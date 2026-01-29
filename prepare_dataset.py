@@ -80,6 +80,24 @@ def normalize_per_spectrum(signals):
     '''
     return (signals - signals.mean(axis=1, keepdims=True)) / (signals.std(axis=1, keepdims=True) + 1e-8)
 
+def average_per_mw_config(signals, n_repeat_per_mw=100):
+    """
+    signals: (num_experiments, num_freq, num_signal_measurement) -> (257, 201, 500)
+    n_repeat_per_mw: number of repeated signals per MW configuration block -> (100)
+    returns: (num_experiments * n_mw, num_freq) -> (257, 5, 201)
+    """
+    num_experiments, num_freq, num_signal = signals.shape
+    n_mw = num_signal // n_repeat_per_mw
+    # verify if divisible
+    assert n_mw * n_repeat_per_mw == num_signal, "Mismatch in signal splitting"
+    # reshape to separate MW blocks and repetitions
+    signals = signals.reshape(num_experiments, num_freq, n_mw, n_repeat_per_mw)
+    # average over repetitions (last axis)
+    signals = signals.mean(axis=-1) # -> (num_experiments, num_freq, n_mw)
+    # transpose to have MW blocks as first axis after experiments
+    signals = signals.transpose(0,2,1)
+    return signals
+
 
 def create_pytorch_dataset(frequencies, normalized_signals, Ax, Ay, Az, output_dir):
     """
@@ -113,10 +131,7 @@ def create_pytorch_dataset(frequencies, normalized_signals, Ax, Ay, Az, output_d
     num_experiments = normalized_signals.shape[0]     # Number of configurations
 
     # ===== Save frequencies array as numpy file ===== #
-    np.save(
-        os.path.join(output_dir, "frequencies.npy"),
-        frequencies.astype(np.float32)
-    )
+    np.save(os.path.join(output_dir, "frequencies.npy"), frequencies.astype(np.float32))
 
     # ===== Save metadata as CSV file ===== #
     metadata = pd.DataFrame({
@@ -145,6 +160,44 @@ def create_pytorch_dataset(frequencies, normalized_signals, Ax, Ay, Az, output_d
         )
 
 
+def create_pytorch_dataset_averaged(frequencies, averaged_signals, Ax, Ay, Az, output_dir, n_mw=5):
+    """
+    Create a compatible PyTorch dataset with averaged signals per MW configuration.
+    Each file corresponds to one current configuration and contains all MW blocks.
+    Structure created:
+    output_dir/
+    ├── frequencies.npy # (201,)
+    ├── metadata.csv    # config_id, Ax, Ay, Az
+    └── signals/
+    ├── config_000.npy  # (n_mw, n_freq)
+    ├── config_001.npy
+    └── ...
+    """
+    output_dir = os.path.abspath(output_dir)
+    signals_dir = os.path.join(output_dir, "signals")
+    os.makedirs(signals_dir, exist_ok=True)
+
+    num_configs = len(Ax)
+
+    # Save frequencies
+    np.save(os.path.join(output_dir, "frequencies.npy"), frequencies.astype(np.float32))
+
+    # Save metadata (one row per configuration)
+    metadata = pd.DataFrame({
+        "config_id": np.arange(num_configs),
+        "Ax": Ax.astype(np.float32),
+        "Ay": Ay.astype(np.float32),
+        "Az": Az.astype(np.float32),
+    })
+    metadata.to_csv(os.path.join(output_dir, "metadata.csv"), index=False)
+
+    # Save signals (one file per configuration, all MW blocks included)
+    for config_id in range(num_configs):
+        # Each config contains n_mw signals of length n_freq
+        signal = averaged_signals[config_id] # expected shape: (n_mw, n_freq)
+        np.save(os.path.join(signals_dir, f"config_{config_id:03d}.npy"), signal.astype(np.float32))
+
+
 def main() :
     
     CURRENTS_FILE = "dataset_example/3Dcurrents_sweep_2026-01-26_23h00m53s.csv"
@@ -163,18 +216,15 @@ def main() :
     # Then subtract 1.0 so that the signal varies around 0 instead of 1
     normalized_signals = odmr_contrast(normalized_signals)
 
-    # Further normalize per spectrum for MLP/CNN training (optional but allows having larger amplitudes variations)
+    # Finally, normalize each spectrum by its mean and std
     normalized_signals = normalize_per_spectrum(normalized_signals)
 
+    # Finally average per MW frequency block
+    averaged_signals = average_per_mw_config(normalized_signals, n_repeat_per_mw=100)
+
     # Create PyTorch dataset
-    create_pytorch_dataset(
-        frequencies,
-        normalized_signals,
-        Ax,
-        Ay,
-        Az,
-        OUTPUT_DIR
-    )
+    # create_pytorch_dataset(frequencies, normalized_signals, Ax, Ay, Az, OUTPUT_DIR)
+    create_pytorch_dataset_averaged(frequencies, averaged_signals, Ax, Ay, Az, OUTPUT_DIR)
 
 
 if __name__ == "__main__":

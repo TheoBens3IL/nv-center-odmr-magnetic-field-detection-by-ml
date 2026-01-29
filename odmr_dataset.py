@@ -9,8 +9,9 @@ class ODMRDataset(Dataset):
     """
     PyTorch Dataset for ODMR signals.
 
-    Each line in a config .npy file is a single spectre (201 values), corresponding to one example.
-    Label is the current triplet (Ax, Ay, Az).
+    Each item:
+        X : Tensor (1, N_freq) → 1D spectrum
+        y : Tensor (3,) → (Ax, Ay, Az) : Labels
     """
 
     def __init__(self, dataset_dir, transform=None):
@@ -24,10 +25,9 @@ class ODMRDataset(Dataset):
         self.index_map = []
         for _, row in self.metadata.iterrows(): # iterate over configurations
             config_id = int(row["config_id"])   # get configuration ID
-            signals_file = os.path.join(self.signals_dir, f"config_{config_id:03d}.npy") # load the signals file for this configuration
-            signals = np.load(signals_file)     # load signals array for this configuration (num_signals, num_freq)
-            for signal_id in range(signals.shape[0]): # iterate over signals
-                self.index_map.append((config_id, signal_id)) # map global index to (config_id, signal_id)
+            signals = np.load(os.path.join(self.signals_dir, f"config_{config_id:03d}.npy")) # load signals for this configuration (n_mw_configs, n_freq)
+            for mw_idx in range(signals.shape[0]): # iterate over MW configurations
+                self.index_map.append((config_id, mw_idx)) # map global index to (config_id, mw_idx)
 
     def __len__(self):
         return len(self.index_map)
@@ -36,18 +36,16 @@ class ODMRDataset(Dataset):
         '''
         Get spectrum and label for a given index.
         Returns:
-            spectrum: Tensor of shape (201,)
+            spectrum: Tensor of shape (N_freq,)
             label: Tensor of shape (3,) corresponding to (Ax, Ay, Az)
         '''
-        config_id, signal_id = self.index_map[idx]  # get config_id and signal_id for this idx
-        signals_file = os.path.join(self.signals_dir, f"config_{config_id:03d}.npy")  # load the signals file for this idx configuration 
-        signals = np.load(signals_file)  # load signals array for this configuration (num_signals, num_freq)
-        spectrum = signals[signal_id]    # get the specific spectrum (201,)
+        config_id, mw_idx = self.index_map[idx]  # get config_id and mw_idx for this idx
+
+        signals = np.load(os.path.join(self.signals_dir, f"config_{config_id:03d}.npy"))  # load the signals file for this idx configuration
+        spectrum = signals[mw_idx, :]  # get the specific spectrum for this mw_idx
+        spectrum = torch.from_numpy(spectrum).unsqueeze(0)  # add channel dimension → (1, N_freq))
 
         row = self.metadata.iloc[config_id]  # get the metadata row for this configuration
-        label = np.array([row["Ax"], row["Ay"], row["Az"]], dtype=np.float32)  # get the label (Ax, Ay, Az)
+        label = torch.tensor([row["Ax"], row["Ay"], row["Az"]], dtype=torch.float32)  # get the label (Ax, Ay, Az)
 
-        if self.transform:
-            spectrum = self.transform(spectrum)
-
-        return torch.tensor(spectrum, dtype=torch.float32), torch.tensor(label, dtype=torch.float32)
+        return spectrum, label

@@ -1,8 +1,9 @@
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
+from pathlib import Path
 from split_dataset import train_val_test_split
-from models import MLP
+from models import ODMR_CNN
 
 class EarlyStopping:
     '''
@@ -36,9 +37,6 @@ def train():
 
     train_set, val_set, test_set = train_val_test_split(DATASET_DIR)
 
-    # Get the underlying dataset to access metadata
-    full_dataset = train_set.dataset
-
     train_loader = DataLoader(
         train_set,
         batch_size=BATCH_SIZE,
@@ -54,14 +52,11 @@ def train():
         num_workers=4,
     )
 
-    sample_x, sample_y = train_set[0] # get a sample to determine input/output dimensions
-    input_dim = sample_x.numel()      # flatten input size
-    output_dim = sample_y.numel()     # output size
+    full_dataset = train_set.dataset              # full dataset for input/output dimensions
+    input_channels = full_dataset[0][0].shape[0]  # = 1
+    output_dim = 3                                # (Ax, Ay, Az)
 
-    print(sample_y.min(), sample_y.max(), sample_y.mean()) # print label stats
-    print(sample_x.min(), sample_x.max(), sample_x.mean()) # print input stats
-
-    model = MLP(input_dim, output_dim, dropout=0.2).to(DEVICE)
+    model = ODMR_CNN(input_channels, output_dim).to(DEVICE)
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
@@ -82,7 +77,7 @@ def train():
         train_loss = 0.0
 
         for x, y in train_loader:
-            x = x.view(x.size(0), -1).to(DEVICE)
+            x = x.to(DEVICE)
             y = y.to(DEVICE)
 
             optimizer.zero_grad()
@@ -102,16 +97,16 @@ def train():
         sq_error = 0.0   # for root mean square error per component
         with torch.no_grad():
             for x, y in val_loader:
-                x = x.view(x.size(0), -1).to(DEVICE)
+                x = x.to(DEVICE)
                 y = y.to(DEVICE)
                 pred = model(x)
                 val_loss += criterion(pred, y).item()
                 abs_error += torch.mean(torch.abs(pred - y), dim=0)
-                sq_error += torch.mean((pred - y) ** 2, dim=0)
+                sq_error += torch.mean((pred - y) ** 2, dim=0) * x.size(0)  # sum squared error
 
         val_loss /= len(val_loader)  # average validation loss
         abs_error /= len(val_loader) # MAE per axis
-        rmse = torch.sqrt(sq_error / len(val_loader)) # RMSE per axis
+        rmse = torch.sqrt(sq_error / len(val_loader.dataset)) # RMSE per axis
         # Normalized RMSE
         label_range = torch.tensor([full_dataset.metadata["Ax"].max() - full_dataset.metadata["Ax"].min(),
                                     full_dataset.metadata["Ay"].max() - full_dataset.metadata["Ay"].min(),
@@ -122,10 +117,13 @@ def train():
         # Scheduler step
         scheduler.step(val_loss)  # Adjust learning rate based on validation loss
 
-        print(f"Epoch {epoch+1:03d} | Train: {train_loss:.4e} | Val: {val_loss:.4e} | "
-              f"LR: {optimizer.param_groups[0]['lr']:.3e} | "
-              f"MAE: Ax {abs_error[0]:.3e} | Ay {abs_error[1]:.3e} | Az {abs_error[2]:.3e} | "
-              f"NRMSE: Ax {nrmse[0]*100:.3e} | Ay {nrmse[1]*100:.3e} | Az {nrmse[2]*100:.3e}")
+        print(
+            f"Epoch {epoch+1:03d} | "
+            f"Train_loss {train_loss:.3e} | Val_loss {val_loss:.3e} | "
+            f"LR {optimizer.param_groups[0]['lr']:.2e} | "
+            f"MAE Ax {abs_error[0]:.2e} Ay {abs_error[1]:.2e} Az {abs_error[2]:.2e} | "
+            f"NRMSE Ax {nrmse[0]*100:.2e}% Ay {nrmse[1]*100:.2e}% Az {nrmse[2]*100:.2e}%"
+        )
 
         # Early stopping check
         if early_stopping.step(val_loss, model):
@@ -134,8 +132,12 @@ def train():
 
     # Restore best model (whether early stopping was triggered or not)
     model.load_state_dict(early_stopping.best_state)
-    torch.save(model.state_dict(), "mlp_odmr_best.pt")
-    print(f"Best model saved as mlp_odmr_best.pt (val_loss: {early_stopping.best_loss:.4e})")
+    
+    # Save the best model
+    save_dir = Path("saved_models")
+    model_path = save_dir / f"cnn_odmr_loss_{early_stopping.best_loss:.4e}.pt"
+    torch.save(model.state_dict(), model_path)
+    print(f"Best model saved as {model_path} (val_loss: {early_stopping.best_loss:.3e})")
 
 
 if __name__ == "__main__":
