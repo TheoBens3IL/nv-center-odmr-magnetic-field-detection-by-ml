@@ -1,0 +1,1 @@
+une simple normalisation du signal par le background ne permet pas au MLP de s'entrainer
