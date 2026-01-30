@@ -77,8 +77,39 @@ def odmr_contrast(signals):
 def normalize_per_spectrum(signals):
     '''
     Normalize each spectrum by its mean and standard deviation, for having larger dips variations on each spectrum.
+    WARNING : I don't think this is a good idea as it destroys the amplitude information between different configurations!
     '''
     return (signals - signals.mean(axis=1, keepdims=True)) / (signals.std(axis=1, keepdims=True) + 1e-8)
+
+def normalize_global(signals):
+    '''
+    Global normalization: standardize all signals using global mean and std.
+    This preserves relative differences between spectra while putting values in a reasonable range.
+    
+    Benefits:
+    - Preserves amplitude differences between configurations
+    - Puts values in range suitable for neural networks (roughly -3 to +3)
+    - All signals use the same normalization parameters
+    '''
+    global_mean = signals.mean()
+    global_std = signals.std()
+    print(f"Global normalization: mean={global_mean:.6f}, std={global_std:.6f}")
+    return (signals - global_mean) / (global_std + 1e-8)
+
+def normalize_global_percentile(signals, lower_percentile=1, upper_percentile=99):
+    '''
+    Robust global normalization using percentiles instead of mean/std.
+    More resistant to outliers.
+    
+    Normalizes to globally approximately [-1, +1] range based on percentiles.
+    '''
+    lower = np.percentile(signals, lower_percentile)
+    upper = np.percentile(signals, upper_percentile)
+    center = (upper + lower) / 2
+    scale = (upper - lower) / 2
+    print(f"Percentile global normalization: center={center:.6f}, scale={scale:.6f}")
+    print(f"  (p{lower_percentile}={lower:.6f}, p{upper_percentile}={upper:.6f})")
+    return (signals - center) / (scale + 1e-8)
 
 def average_per_mw_config(signals, n_repeat_per_mw=100):
     """
@@ -216,12 +247,14 @@ def main() :
     # Then subtract 1.0 so that the signal varies around 0 instead of 1
     normalized_signals = odmr_contrast(normalized_signals)
 
-    # Finally, normalize each spectrum by its mean and std
-    normalized_signals = normalize_per_spectrum(normalized_signals)
-
     # Finally average per MW frequency block
-    averaged_signals = average_per_mw_config(normalized_signals, n_repeat_per_mw=100)
+    averaged_signals = average_per_mw_config(normalized_signals, n_repeat_per_mw=500)
 
+    # Apply global normalization to preserve inter-config differences : this puts all signals in a consistent scale while keeping their relative differences
+    # averaged_signals = normalize_global(averaged_signals)
+    # Alternative: Use percentil normalization
+    averaged_signals = normalize_global_percentile(averaged_signals)
+    
     # Create PyTorch dataset
     # create_pytorch_dataset(frequencies, normalized_signals, Ax, Ay, Az, OUTPUT_DIR)
     create_pytorch_dataset_averaged(frequencies, averaged_signals, Ax, Ay, Az, OUTPUT_DIR)

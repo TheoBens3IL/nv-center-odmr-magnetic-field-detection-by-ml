@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import os
 from matplotlib.widgets import Slider, CheckButtons
-from prepare_dataset import load_currents, load_esr_raw, normalize_by_background, odmr_contrast, normalize_per_spectrum, average_per_mw_config
+from prepare_dataset import load_currents, load_esr_raw, normalize_by_background, odmr_contrast, normalize_per_spectrum, average_per_mw_config, normalize_global, normalize_global_percentile
 
 def plot_spectrum(frequencies, raw_signals, raw_backgrounds, currents):
     """
@@ -45,9 +45,9 @@ def plot_spectrum(frequencies, raw_signals, raw_backgrounds, currents):
     ax_mw.set_visible(False)
     
     # Create checkboxes for processing options
-    ax_check = plt.axes([0.03, 0.2, 0.22, 0.25])
-    labels = ['Normalize by background', 'ODMR contrast', 'Normalize per spectrum', 'Average per MW config']
-    visibility = [False, False, False, False]
+    ax_check = plt.axes([0.015, 0.2, 0.22, 0.25])
+    labels = ['Normalize by background', 'ODMR contrast', 'Normalize per spectrum', 'Average per MW config', 'Normalize global', 'Normalize global percentile']
+    visibility = [False, False, False, False, False, False]
     check = CheckButtons(ax_check, labels, visibility)
     
     # Update function
@@ -61,7 +61,9 @@ def plot_spectrum(frequencies, raw_signals, raw_backgrounds, currents):
         apply_contrast = check.get_status()[1]
         normalize_spec = check.get_status()[2]
         apply_average = check.get_status()[3]
-        
+        normalize_global_flag = check.get_status()[4]
+        normalize_global_percentile_flag = check.get_status()[5]
+
         # Start with raw signals
         processed = raw_signals.copy()
         
@@ -74,6 +76,12 @@ def plot_spectrum(frequencies, raw_signals, raw_backgrounds, currents):
         
         if normalize_spec:
             processed = normalize_per_spectrum(processed)
+
+        if normalize_global_flag:
+            processed = normalize_global(processed)
+
+        if normalize_global_percentile_flag:
+            processed = normalize_global_percentile(processed)
         
         if apply_average:
             processed = average_per_mw_config(processed, n_repeat_per_mw=100)
@@ -197,12 +205,12 @@ def plot_pytorch_dataset(dataset_dir):
 
 if __name__ == "__main__":
     # === Option 1: Visualize raw dataset with processing options ===
-    # CURRENTS_FILE = "dataset_example/3Dcurrents_sweep_2026-01-26_23h00m53s.csv"
-    # ESR_FILE = "dataset_example/ESR_2026-01-26_23h00m57sRaw.txt"
-    # Ax, Ay, Az = load_currents(CURRENTS_FILE)
-    # frequencies, signals, backgrounds = load_esr_raw(ESR_FILE)
-    # plot_spectrum(frequencies, signals, backgrounds, np.column_stack((Ax, Ay, Az)))
+    CURRENTS_FILE = "dataset_example/3Dcurrents_sweep_2026-01-26_23h00m53s.csv"
+    ESR_FILE = "dataset_example/ESR_2026-01-26_23h00m57sRaw.txt"
+    Ax, Ay, Az = load_currents(CURRENTS_FILE)
+    frequencies, signals, backgrounds = load_esr_raw(ESR_FILE)
+    plot_spectrum(frequencies, signals, backgrounds, np.column_stack((Ax, Ay, Az)))
     
     # === Option 2: Visualize PyTorch dataset ===
-    DATASET_DIR = "pytorch_dataset_example"
-    plot_pytorch_dataset(DATASET_DIR)
+    # DATASET_DIR = "pytorch_dataset_example"
+    # plot_pytorch_dataset(DATASET_DIR)
