@@ -29,12 +29,13 @@ class EarlyStopping:
         return self.counter >= self.patience           # return True if early stopping criterion met  
 
 
-def train():
+def train(batch_size=16, epochs=200, lr=1e-3, weight_decay=1e-4):
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     DATASET_DIR = "pytorch_dataset_example"
-    BATCH_SIZE = 32  # Number of samples processed together in one forward/backward pass through the neural network before updating model weights
-    EPOCHS = 200     # Larger number of epochs to let early stopping decide when to stop
-    LR = 1e-3        # Learning rate
+    BATCH_SIZE = batch_size  # Number of samples processed together in one forward/backward pass through the neural network before updating model weights
+    EPOCHS = epochs     # Larger number of epochs to let early stopping decide when to stop
+    LR = lr        # Learning rate
+    WEIGHT_DECAY = weight_decay  # Weight decay for optimizer
 
     train_set, val_set, test_set = train_val_test_split(DATASET_DIR)
 
