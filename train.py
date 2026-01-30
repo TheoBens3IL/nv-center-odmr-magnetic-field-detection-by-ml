@@ -31,7 +31,7 @@ class EarlyStopping:
 
 
 def train(batch_size=16, epochs=200, lr=3e-4, weight_decay=1e-4, dataset_dir="pytorch_dataset_example", 
-          patience=15, dropout=0.3, min_delta=1e-5):
+          patience=15, min_delta=1e-5):
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     DATASET_DIR = dataset_dir
     BATCH_SIZE = batch_size  # Number of samples processed together in one forward/backward pass through the neural network before updating model weights
@@ -72,7 +72,7 @@ def train(batch_size=16, epochs=200, lr=3e-4, weight_decay=1e-4, dataset_dir="py
     print(f"Max: {all_signals.max()}")
     print(f"Std: {all_signals.std()}\n")
 
-    model = ODMR_CNN(input_channels, output_dim, dropout=dropout).to(DEVICE)
+    model = ODMR_CNN(input_channels, output_dim).to(DEVICE)
     print(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
     print(f"Parameter to data ratio: 1:{len(train_set) / sum(p.numel() for p in model.parameters()):.1f}")
     print(f"Training on device: {DEVICE}\n")
@@ -267,8 +267,6 @@ if __name__ == "__main__":
                         help='Learning rate (default: 3e-4)')
     parser.add_argument('--weight_decay', type=float, default=1e-4, 
                         help='Weight decay for optimizer (default: 1e-4)')
-    parser.add_argument('--dropout', type=float, default=0.5, 
-                        help='Dropout rate (default: 0.5)')
     
     # Early stopping parameters
     parser.add_argument('--patience', type=int, default=30, 
@@ -289,7 +287,6 @@ if __name__ == "__main__":
     print(f"Epochs:         {args.epochs}")
     print(f"Learning rate:  {args.lr}")
     print(f"Weight decay:   {args.weight_decay}")
-    print(f"Dropout:        {args.dropout}")
     print(f"Patience:       {args.patience}")
     print(f"Min delta:      {args.min_delta}")
     print(f"Dataset dir:    {args.dataset_dir}")
@@ -303,6 +300,5 @@ if __name__ == "__main__":
         weight_decay=args.weight_decay,
         dataset_dir=args.dataset_dir,
         patience=args.patience,
-        dropout=args.dropout,
         min_delta=args.min_delta
     )
