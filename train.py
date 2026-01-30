@@ -3,6 +3,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 from pathlib import Path
 import matplotlib.pyplot as plt
+import argparse
 from split_dataset import train_val_test_split
 from models import ODMR_CNN
 
@@ -29,9 +30,10 @@ class EarlyStopping:
         return self.counter >= self.patience           # return True if early stopping criterion met  
 
 
-def train(batch_size=16, epochs=200, lr=1e-3, weight_decay=1e-4):
+def train(batch_size=16, epochs=200, lr=3e-4, weight_decay=1e-4, dataset_dir="pytorch_dataset_example", 
+          patience=15, dropout=0.3, min_delta=1e-5):
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    DATASET_DIR = "pytorch_dataset_example"
+    DATASET_DIR = dataset_dir
     BATCH_SIZE = batch_size  # Number of samples processed together in one forward/backward pass through the neural network before updating model weights
     EPOCHS = epochs     # Larger number of epochs to let early stopping decide when to stop
     LR = lr        # Learning rate
@@ -70,7 +72,7 @@ def train(batch_size=16, epochs=200, lr=1e-3, weight_decay=1e-4):
     print(f"Max: {all_signals.max()}")
     print(f"Std: {all_signals.std()}\n")
 
-    model = ODMR_CNN(input_channels, output_dim, dropout=0.5).to(DEVICE)
+    model = ODMR_CNN(input_channels, output_dim, dropout=dropout).to(DEVICE)
     print(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
     print(f"Parameter to data ratio: 1:{len(train_set) / sum(p.numel() for p in model.parameters()):.1f}")
     print(f"Training on device: {DEVICE}\n")
@@ -86,7 +88,7 @@ def train(batch_size=16, epochs=200, lr=1e-3, weight_decay=1e-4):
         eta_min=1e-6   # Minimum LR
     )
 
-    early_stopping = EarlyStopping(patience=30, min_delta=1e-5)
+    early_stopping = EarlyStopping(patience=patience, min_delta=min_delta)
 
     # Metrics history for plotting
     history = {
@@ -254,4 +256,53 @@ def plot_training_history(history, best_loss):
 
 
 if __name__ == "__main__":
-    train()
+    parser = argparse.ArgumentParser(description='Train ODMR CNN model for magnetic field detection')
+    
+    # Training hyperparameters
+    parser.add_argument('--batch_size', type=int, default=16, 
+                        help='Batch size for training (default: 16)')
+    parser.add_argument('--epochs', type=int, default=200, 
+                        help='Maximum number of training epochs (default: 200)')
+    parser.add_argument('--lr', type=float, default=3e-4, 
+                        help='Learning rate (default: 3e-4)')
+    parser.add_argument('--weight_decay', type=float, default=1e-4, 
+                        help='Weight decay for optimizer (default: 1e-4)')
+    parser.add_argument('--dropout', type=float, default=0.5, 
+                        help='Dropout rate (default: 0.5)')
+    
+    # Early stopping parameters
+    parser.add_argument('--patience', type=int, default=30, 
+                        help='Early stopping patience (default: 30)')
+    parser.add_argument('--min_delta', type=float, default=1e-5, 
+                        help='Minimum delta for early stopping (default: 1e-5)')
+    
+    # Dataset parameters
+    parser.add_argument('--dataset_dir', type=str, default='pytorch_dataset_example', 
+                        help='Path to dataset directory (default: pytorch_dataset_example)')
+    
+    args = parser.parse_args()
+    
+    print("=" * 60)
+    print("Training Configuration:")
+    print("=" * 60)
+    print(f"Batch size:     {args.batch_size}")
+    print(f"Epochs:         {args.epochs}")
+    print(f"Learning rate:  {args.lr}")
+    print(f"Weight decay:   {args.weight_decay}")
+    print(f"Dropout:        {args.dropout}")
+    print(f"Patience:       {args.patience}")
+    print(f"Min delta:      {args.min_delta}")
+    print(f"Dataset dir:    {args.dataset_dir}")
+    print("=" * 60)
+    print()
+    
+    train(
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        dataset_dir=args.dataset_dir,
+        patience=args.patience,
+        dropout=args.dropout,
+        min_delta=args.min_delta
+    )
