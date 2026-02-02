@@ -3,7 +3,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 from pathlib import Path
 import matplotlib.pyplot as plt
-import argparse
+import numpy as np
 from split_dataset import train_val_test_split
 from models import ODMR_CNN
 
@@ -30,14 +30,13 @@ class EarlyStopping:
         return self.counter >= self.patience           # return True if early stopping criterion met  
 
 
-def train(batch_size=16, epochs=200, lr=3e-4, weight_decay=1e-4, dataset_dir="pytorch_dataset_example", 
-          patience=15, min_delta=1e-5):
+def train(batch_size=64, epochs=300, lr=3e-4, weight_decay=1e-3, dataset_dir="pytorch_dataset_example"):
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     DATASET_DIR = dataset_dir
-    BATCH_SIZE = batch_size  # Number of samples processed together in one forward/backward pass through the neural network before updating model weights
-    EPOCHS = epochs     # Larger number of epochs to let early stopping decide when to stop
-    LR = lr        # Learning rate
-    WEIGHT_DECAY = weight_decay  # Weight decay for optimizer
+    BATCH_SIZE = batch_size
+    EPOCHS = epochs
+    LR = lr
+    WEIGHT_DECAY = weight_decay
 
     train_set, val_set, test_set = train_val_test_split(DATASET_DIR)
 
@@ -60,35 +59,57 @@ def train(batch_size=16, epochs=200, lr=3e-4, weight_decay=1e-4, dataset_dir="py
     input_channels = full_dataset[0][0].shape[0]  # = 1
     output_dim = 3                                # (Ax, Ay, Az)
 
-    # Verify datas metrics (min, max, mean) of labels and signals
-    print("Labels statistics:")
-    all_labels = torch.stack([full_dataset[i][1] for i in range(len(full_dataset))], dim=0)
-    print(f"Min: {all_labels.min(dim=0).values}")
-    print(f"Max: {all_labels.max(dim=0).values}")
-    print(f"Mean: {all_labels.mean(dim=0)}")
-    print("Signals statistics:")
-    all_signals = torch.cat([full_dataset[i][0] for i in range(len(full_dataset))], dim=0)
-    print(f"Min: {all_signals.min()}")
-    print(f"Max: {all_signals.max()}")
-    print(f"Std: {all_signals.std()}\n")
+    # Verify data metrics from metadata (faster than loading all samples)
+    print("Labels statistics (from metadata):")
+    label_cols = full_dataset.label_cols
+    print(f"Min: [{full_dataset.metadata[label_cols[0]].min():.4f}, {full_dataset.metadata[label_cols[1]].min():.4f}, {full_dataset.metadata[label_cols[2]].min():.4f}]")
+    print(f"Max: [{full_dataset.metadata[label_cols[0]].max():.4f}, {full_dataset.metadata[label_cols[1]].max():.4f}, {full_dataset.metadata[label_cols[2]].max():.4f}]")
+    print(f"Mean: [{full_dataset.metadata[label_cols[0]].mean():.4f}, {full_dataset.metadata[label_cols[1]].mean():.4f}, {full_dataset.metadata[label_cols[2]].mean():.4f}]")
+    
+    # Sample a few signals to check normalization
+    print("Signals statistics (sample of 100 signals):")
+    sample_indices = np.random.choice(len(full_dataset), min(100, len(full_dataset)), replace=False)
+    sample_signals = torch.cat([full_dataset[i][0] for i in sample_indices], dim=0)
+    print(f"Min: {sample_signals.min():.4f}")
+    print(f"Max: {sample_signals.max():.4f}")
+    print(f"Std: {sample_signals.std():.4f}\n")
 
-    model = ODMR_CNN(input_channels, output_dim).to(DEVICE)
-    print(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
-    print(f"Parameter to data ratio: 1:{len(train_set) / sum(p.numel() for p in model.parameters()):.1f}")
+    # Auto-adjust dropout based on dataset size
+    dataset_size = len(train_set)
+    if dataset_size < 500:
+        dropout = 0.5  # High dropout for very small datasets
+    elif dataset_size < 2000:
+        dropout = 0.4
+    else:
+        dropout = 0.35  # Moderate dropout for larger datasets
+    
+    model = ODMR_CNN(input_channels, output_dim, dropout=dropout).to(DEVICE)
+    n_params = sum(p.numel() for p in model.parameters())
+    
+    print(f"Model created with {n_params} parameters")
+    print(f"Dataset size: {dataset_size} samples")
+    if n_params > 0:
+        ratio = dataset_size / n_params
+        print(f"Samples per parameter: {ratio:.1f} (want >10, ideally >100)")
+    print(f"Dropout: {dropout}")
     print(f"Training on device: {DEVICE}\n")
     
     criterion = nn.MSELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 
-    # Cosine annealing scheduler - better for small datasets
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    # OneCycleLR scheduler - proven best for many datasets
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
-        T_0=20,        # Initial restart period
-        T_mult=2,      # Period multiplier
-        eta_min=1e-6   # Minimum LR
+        max_lr=LR * 10,  # Peak learning rate
+        epochs=EPOCHS,
+        steps_per_epoch=len(train_loader),
+        pct_start=0.3,   # 30% warmup
+        anneal_strategy='cos',
+        div_factor=25.0,  # Initial LR = max_lr/25
+        final_div_factor=1000.0  # Final LR = max_lr/1000
     )
 
-    early_stopping = EarlyStopping(patience=patience, min_delta=min_delta)
+    early_stopping = EarlyStopping(patience=30, min_delta=1e-5)
 
     # Metrics history for plotting
     history = {
@@ -112,6 +133,7 @@ def train(batch_size=16, epochs=200, lr=3e-4, weight_decay=1e-4, dataset_dir="py
             loss = criterion(pred, y)   # compute loss
             loss.backward()             # backward pass
             optimizer.step()            # update weights
+            scheduler.step()            # step scheduler per batch for OneCycleLR
 
             train_loss += loss.item()   # accumulate loss
 
@@ -136,13 +158,15 @@ def train(batch_size=16, epochs=200, lr=3e-4, weight_decay=1e-4, dataset_dir="py
         rmse = torch.sqrt(sq_error / len(val_loader.dataset)) # RMSE per axis
         
         # Normalized metrics (by range and by mean)
-        label_range = torch.tensor([full_dataset.metadata["Ax"].max() - full_dataset.metadata["Ax"].min(),
-                                    full_dataset.metadata["Ay"].max() - full_dataset.metadata["Ay"].min(),
-                                    full_dataset.metadata["Az"].max() - full_dataset.metadata["Az"].min()],
+        # Use auto-detected label column names
+        label_cols = full_dataset.label_cols
+        label_range = torch.tensor([full_dataset.metadata[label_cols[0]].max() - full_dataset.metadata[label_cols[0]].min(),
+                                    full_dataset.metadata[label_cols[1]].max() - full_dataset.metadata[label_cols[1]].min(),
+                                    full_dataset.metadata[label_cols[2]].max() - full_dataset.metadata[label_cols[2]].min()],
                                     dtype=torch.float32, device=DEVICE)
-        label_mean = torch.tensor([full_dataset.metadata["Ax"].mean(),
-                                   full_dataset.metadata["Ay"].mean(),
-                                   full_dataset.metadata["Az"].mean()],
+        label_mean = torch.tensor([full_dataset.metadata[label_cols[0]].mean(),
+                                   full_dataset.metadata[label_cols[1]].mean(),
+                                   full_dataset.metadata[label_cols[2]].mean()],
                                    dtype=torch.float32, device=DEVICE)
         
         nrmse = rmse / label_range  # Normalized RMSE by range
@@ -159,16 +183,17 @@ def train(batch_size=16, epochs=200, lr=3e-4, weight_decay=1e-4, dataset_dir="py
         history['nrmse_ay'].append(nrmse[1].item() * 100)
         history['nrmse_az'].append(nrmse[2].item() * 100)
 
-        # Scheduler step (Cosine annealing updates every epoch)
-        scheduler.step()
+        # Get current LR (OneCycleLR updates per batch, so just check current value)
         current_lr = optimizer.param_groups[0]['lr']
 
+        # Use label names for display
+        label_cols = full_dataset.label_cols
         print(
             f"Epoch {epoch+1:03d} :\n"
             f" -> Train_loss: {train_loss:.3e} | Val_loss: {val_loss:.3e} \n"
             f" -> LR: {optimizer.param_groups[0]['lr']:.2e} \n"
-            f" -> NMAE:  Ax {nmae[0]*100:.2f}%  - Ay {nmae[1]*100:.2f}%  - Az {nmae[2]*100:.2f}% \n"
-            f" -> NRMSE: Ax {nrmse[0]*100:.2f}% - Ay {nrmse[1]*100:.2f}% - Az {nrmse[2]*100:.2f}%"
+            f" -> NMAE:  {label_cols[0]} {nmae[0]*100:.2f}%  - {label_cols[1]} {nmae[1]*100:.2f}%  - {label_cols[2]} {nmae[2]*100:.2f}% \n"
+            f" -> NRMSE: {label_cols[0]} {nrmse[0]*100:.2f}% - {label_cols[1]} {nrmse[1]*100:.2f}% - {label_cols[2]} {nrmse[2]*100:.2f}%"
         )
 
         # Early stopping check
@@ -256,49 +281,4 @@ def plot_training_history(history, best_loss):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Train ODMR CNN model for magnetic field detection')
-    
-    # Training hyperparameters
-    parser.add_argument('--batch_size', type=int, default=16, 
-                        help='Batch size for training (default: 16)')
-    parser.add_argument('--epochs', type=int, default=200, 
-                        help='Maximum number of training epochs (default: 200)')
-    parser.add_argument('--lr', type=float, default=3e-4, 
-                        help='Learning rate (default: 3e-4)')
-    parser.add_argument('--weight_decay', type=float, default=1e-4, 
-                        help='Weight decay for optimizer (default: 1e-4)')
-    
-    # Early stopping parameters
-    parser.add_argument('--patience', type=int, default=30, 
-                        help='Early stopping patience (default: 30)')
-    parser.add_argument('--min_delta', type=float, default=1e-5, 
-                        help='Minimum delta for early stopping (default: 1e-5)')
-    
-    # Dataset parameters
-    parser.add_argument('--dataset_dir', type=str, default='pytorch_dataset_example', 
-                        help='Path to dataset directory (default: pytorch_dataset_example)')
-    
-    args = parser.parse_args()
-    
-    print("=" * 60)
-    print("Training Configuration:")
-    print("=" * 60)
-    print(f"Batch size:     {args.batch_size}")
-    print(f"Epochs:         {args.epochs}")
-    print(f"Learning rate:  {args.lr}")
-    print(f"Weight decay:   {args.weight_decay}")
-    print(f"Patience:       {args.patience}")
-    print(f"Min delta:      {args.min_delta}")
-    print(f"Dataset dir:    {args.dataset_dir}")
-    print("=" * 60)
-    print()
-    
-    train(
-        batch_size=args.batch_size,
-        epochs=args.epochs,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        dataset_dir=args.dataset_dir,
-        patience=args.patience,
-        min_delta=args.min_delta
-    )
+    train(dataset_dir="synthetic_dataset")

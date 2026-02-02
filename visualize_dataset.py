@@ -203,14 +203,86 @@ def plot_pytorch_dataset(dataset_dir):
     plt.show()
 
 
+def plot_synthetic_dataset(dataset_dir):
+    """
+    Interactive visualization of Synthetic dataset.
+    
+    Parameters:
+        dataset_dir : str
+            Path to the synthetic dataset directory containing:
+            - frequencies.npy
+            - metadata.csv
+            - signals/ folder with config_XXXXXX.npy files
+    """
+    # Load dataset components
+    frequencies = np.load(os.path.join(dataset_dir, "frequencies.npy"))
+    metadata = pd.read_csv(os.path.join(dataset_dir, "metadata.csv"))
+    
+    num_configs = len(metadata)
+    Bx = metadata["Bx"].values
+    By = metadata["By"].values
+    Bz = metadata["Bz"].values
+    
+    # Load first config to get shape
+    first_signal = np.load(os.path.join(dataset_dir, "signals", "config_000000.npy"))
+    num_repeats = first_signal.shape[0]  # (num_repeats, num_freq)
+    
+    # Create figure with sliders
+    fig, ax = plt.subplots(figsize=(12, 7))
+    plt.subplots_adjust(bottom=0.25)
+    
+    # Initial plot (config=0, repeat=0)
+    line, = ax.plot(frequencies / 1e9, first_signal[0, :], 'b-')
+    ax.set_xlabel('Frequency (GHz)', fontsize=12)
+    ax.set_ylabel('Fluorescence Signal (a.u.)', fontsize=12)
+    ax.set_title('Synthetic Dataset — Config 0, Repeat 0 — B field: Bx=%.2f, By=%.2f, Bz=%.2f' % (Bx[0], By[0], Bz[0]))
+    ax.grid(True, alpha=0.3)
+    
+    # Create sliders
+    ax_config = plt.axes([0.15, 0.12, 0.7, 0.03])
+    ax_repeat = plt.axes([0.15, 0.06, 0.7, 0.03])
+    
+    slider_config = Slider(ax_config, 'Config', 0, num_configs - 1, valinit=0, valstep=1)
+    slider_repeat = Slider(ax_repeat, 'Repeat', 0, num_repeats - 1, valinit=0, valstep=1)
+    
+    # Update function
+    def update(val=None):
+        config_id = int(slider_config.val)
+        repeat_id = int(slider_repeat.val)
+        
+        # Load the signal file for this config
+        signal_file = os.path.join(dataset_dir, "signals", f"config_{config_id:06d}.npy")
+        signals = np.load(signal_file)  # (num_repeats, num_freq)
+        
+        # Update plot
+        line.set_ydata(signals[repeat_id, :])
+        ax.set_title(f'Synthetic Dataset — Config {config_id}, Repeat {repeat_id} — '
+                    f'B field: Bx={Bx[config_id]:.2f}, By={By[config_id]:.2f}, Bz={Bz[config_id]:.2f}')
+        
+        # Auto-scale y-axis
+        ax.relim()
+        ax.autoscale_view(scalex=False, scaley=True)
+        fig.canvas.draw_idle()
+    
+    # Connect sliders
+    slider_config.on_changed(update)
+    slider_repeat.on_changed(update)
+    
+    plt.show()
+
+
 if __name__ == "__main__":
     # === Option 1: Visualize raw dataset with processing options ===
-    CURRENTS_FILE = "dataset_example/3Dcurrents_sweep_2026-01-26_23h00m53s.csv"
-    ESR_FILE = "dataset_example/ESR_2026-01-26_23h00m57sRaw.txt"
-    Ax, Ay, Az = load_currents(CURRENTS_FILE)
-    frequencies, signals, backgrounds = load_esr_raw(ESR_FILE)
-    plot_spectrum(frequencies, signals, backgrounds, np.column_stack((Ax, Ay, Az)))
+    # CURRENTS_FILE = "dataset_example/3Dcurrents_sweep_2026-01-26_23h00m53s.csv"
+    # ESR_FILE = "dataset_example/ESR_2026-01-26_23h00m57sRaw.txt"
+    # Ax, Ay, Az = load_currents(CURRENTS_FILE)
+    # frequencies, signals, backgrounds = load_esr_raw(ESR_FILE)
+    # plot_spectrum(frequencies, signals, backgrounds, np.column_stack((Ax, Ay, Az)))
     
     # === Option 2: Visualize PyTorch dataset ===
     # DATASET_DIR = "pytorch_dataset_example"
     # plot_pytorch_dataset(DATASET_DIR)
+
+    # === Option 3: Visualize Synthetic dataset ===
+    DATASET_DIR = "synthetic_dataset"
+    plot_synthetic_dataset(DATASET_DIR)
