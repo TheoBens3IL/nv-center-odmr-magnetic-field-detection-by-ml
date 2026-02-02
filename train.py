@@ -30,7 +30,7 @@ class EarlyStopping:
         return self.counter >= self.patience           # return True if early stopping criterion met  
 
 
-def train(batch_size=32, epochs=200, lr=1e-3, weight_decay=1e-4, dataset_dir="dataset_multi_mw", 
+def train(batch_size=32, epochs=200, lr=5e-4, weight_decay=1e-4, dataset_dir="dataset_multi_mw", 
           patience=20, min_delta=1e-6):
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     DATASET_DIR = dataset_dir
@@ -77,8 +77,10 @@ def train(batch_size=32, epochs=200, lr=1e-3, weight_decay=1e-4, dataset_dir="da
     print(f"Max: {all_signals.max()}")
     print(f"Std: {all_signals.std()}\n")
 
-    model = ODMR_CNN(n_freq=201, output_dim=output_dim).to(DEVICE)
-    print(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
+    # Use compact model - better for this dataset size
+    from models import ODMR_CNN_Compact
+    model = ODMR_CNN_Compact(n_freq=201, output_dim=output_dim).to(DEVICE)
+    print(f"Model created with {sum(p.numel() for p in model.parameters()):,} parameters")
     print(f"Parameter to data ratio: 1:{len(train_set) / sum(p.numel() for p in model.parameters()):.2f}")
     print(f"Training on device: {DEVICE}\n")
     
@@ -268,8 +270,8 @@ if __name__ == "__main__":
                         help='Batch size for training (default: 32)')
     parser.add_argument('--epochs', type=int, default=200, 
                         help='Maximum number of training epochs (default: 200)')
-    parser.add_argument('--lr', type=float, default=1e-3, 
-                        help='Learning rate (default: 1e-3)')
+    parser.add_argument('--lr', type=float, default=5e-4, 
+                        help='Learning rate (default: 5e-4)')
     parser.add_argument('--weight_decay', type=float, default=1e-4, 
                         help='Weight decay for optimizer (default: 1e-4)')
     
