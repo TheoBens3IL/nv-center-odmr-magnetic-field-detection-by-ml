@@ -30,14 +30,14 @@ class EarlyStopping:
         return self.counter >= self.patience           # return True if early stopping criterion met  
 
 
-def train(batch_size=16, epochs=200, lr=3e-4, weight_decay=1e-4, dataset_dir="pytorch_dataset_example", 
-          patience=15, min_delta=1e-5):
+def train(batch_size=32, epochs=200, lr=1e-3, weight_decay=1e-4, dataset_dir="dataset_multi_mw", 
+          patience=20, min_delta=1e-6):
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     DATASET_DIR = dataset_dir
-    BATCH_SIZE = batch_size  # Number of samples processed together in one forward/backward pass through the neural network before updating model weights
-    EPOCHS = epochs     # Larger number of epochs to let early stopping decide when to stop
-    LR = lr        # Learning rate
-    WEIGHT_DECAY = weight_decay  # Weight decay for optimizer
+    BATCH_SIZE = batch_size  # Increased for larger dataset (21k samples)
+    EPOCHS = epochs
+    LR = lr        # Slightly higher LR for faster convergence with more data
+    WEIGHT_DECAY = weight_decay
 
     train_set, val_set, test_set = train_val_test_split(DATASET_DIR)
 
@@ -57,8 +57,13 @@ def train(batch_size=16, epochs=200, lr=3e-4, weight_decay=1e-4, dataset_dir="py
     )
 
     full_dataset = train_set.dataset              # full dataset for input/output dimensions
-    input_channels = full_dataset[0][0].shape[0]  # = 1
     output_dim = 3                                # (Ax, Ay, Az)
+    
+    print(f"Dataset sizes:")
+    print(f"  Train: {len(train_set)} samples")
+    print(f"  Val:   {len(val_set)} samples")
+    print(f"  Test:  {len(test_set)} samples")
+    print(f"  Total: {len(train_set) + len(val_set) + len(test_set)} samples\n")
 
     # Verify datas metrics (min, max, mean) of labels and signals
     print("Labels statistics:")
@@ -72,18 +77,18 @@ def train(batch_size=16, epochs=200, lr=3e-4, weight_decay=1e-4, dataset_dir="py
     print(f"Max: {all_signals.max()}")
     print(f"Std: {all_signals.std()}\n")
 
-    model = ODMR_CNN(input_channels, output_dim).to(DEVICE)
+    model = ODMR_CNN(n_freq=201, output_dim=output_dim).to(DEVICE)
     print(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
-    print(f"Parameter to data ratio: 1:{len(train_set) / sum(p.numel() for p in model.parameters()):.1f}")
+    print(f"Parameter to data ratio: 1:{len(train_set) / sum(p.numel() for p in model.parameters()):.2f}")
     print(f"Training on device: {DEVICE}\n")
     
     criterion = nn.MSELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
 
-    # Cosine annealing scheduler - better for small datasets
+    # Cosine annealing with warm restarts - good for larger datasets
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer,
-        T_0=20,        # Initial restart period
+        T_0=30,        # Initial restart period (longer for more data)
         T_mult=2,      # Period multiplier
         eta_min=1e-6   # Minimum LR
     )
@@ -259,24 +264,24 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train ODMR CNN model for magnetic field detection')
     
     # Training hyperparameters
-    parser.add_argument('--batch_size', type=int, default=16, 
-                        help='Batch size for training (default: 16)')
+    parser.add_argument('--batch_size', type=int, default=32, 
+                        help='Batch size for training (default: 32)')
     parser.add_argument('--epochs', type=int, default=200, 
                         help='Maximum number of training epochs (default: 200)')
-    parser.add_argument('--lr', type=float, default=3e-4, 
-                        help='Learning rate (default: 3e-4)')
+    parser.add_argument('--lr', type=float, default=1e-3, 
+                        help='Learning rate (default: 1e-3)')
     parser.add_argument('--weight_decay', type=float, default=1e-4, 
                         help='Weight decay for optimizer (default: 1e-4)')
     
     # Early stopping parameters
-    parser.add_argument('--patience', type=int, default=30, 
-                        help='Early stopping patience (default: 30)')
-    parser.add_argument('--min_delta', type=float, default=1e-5, 
-                        help='Minimum delta for early stopping (default: 1e-5)')
+    parser.add_argument('--patience', type=int, default=20, 
+                        help='Early stopping patience (default: 20)')
+    parser.add_argument('--min_delta', type=float, default=1e-6, 
+                        help='Minimum delta for early stopping (default: 1e-6)')
     
     # Dataset parameters
-    parser.add_argument('--dataset_dir', type=str, default='pytorch_dataset_example', 
-                        help='Path to dataset directory (default: pytorch_dataset_example)')
+    parser.add_argument('--dataset_dir', type=str, default='dataset_multi_mw', 
+                        help='Path to dataset directory (default: dataset_multi_mw)')
     
     args = parser.parse_args()
     

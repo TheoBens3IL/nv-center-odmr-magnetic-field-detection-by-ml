@@ -24,8 +24,8 @@ class ODMRDataset(Dataset):
         # Create mapping: global index -> (config_id, signal_id) , to associate each signal to its current configuration (label)
         self.index_map = []
         for _, row in self.metadata.iterrows(): # iterate over configurations
-            config_id = int(row["config_id"])   # get configuration ID
-            signals = np.load(os.path.join(self.signals_dir, f"config_{config_id:03d}.npy")) # load signals for this configuration (n_mw_configs, n_freq)
+            config_id = int(row["experiment_id"])   # get configuration ID (column renamed to experiment_id)
+            signals = np.load(os.path.join(self.signals_dir, f"config_{config_id:04d}.npy")) # load signals for this configuration (n_mw_configs, n_freq) - 4 digits
             for mw_idx in range(signals.shape[0]): # iterate over MW configurations
                 self.index_map.append((config_id, mw_idx)) # map global index to (config_id, mw_idx)
 
@@ -41,11 +41,11 @@ class ODMRDataset(Dataset):
         '''
         config_id, mw_idx = self.index_map[idx]  # get config_id and mw_idx for this idx
 
-        signals = np.load(os.path.join(self.signals_dir, f"config_{config_id:03d}.npy"))  # load the signals file for this idx configuration
+        signals = np.load(os.path.join(self.signals_dir, f"config_{config_id:04d}.npy"))  # load the signals file for this idx configuration (4 digits)
         spectrum = signals[mw_idx, :]  # get the specific spectrum for this mw_idx
         spectrum = torch.from_numpy(spectrum).unsqueeze(0)  # add channel dimension → (1, N_freq))
 
-        row = self.metadata.iloc[config_id]  # get the metadata row for this configuration
+        row = self.metadata[self.metadata["experiment_id"] == config_id].iloc[0]  # get the metadata row for this configuration (use experiment_id)
         label = torch.tensor([row["Ax"], row["Ay"], row["Az"]], dtype=torch.float32)  # get the label (Ax, Ay, Az)
 
         return spectrum, label

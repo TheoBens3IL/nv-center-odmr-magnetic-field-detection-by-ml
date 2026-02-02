@@ -7,10 +7,10 @@ from odmr_dataset import ODMRDataset
 
 def train_val_test_split(dataset_dir, val_size=0.15, test_size=0.15, random_state=1):
     """
-    Split the dataset by config_ids into train, val, and test sets.
+    Split the dataset by experiment_ids into train, val, and test sets.
     """
     metadata = pd.read_csv(os.path.join(dataset_dir, "metadata.csv"))
-    config_ids = metadata["config_id"].values
+    config_ids = metadata["experiment_id"].values
 
     train_ids, test_ids = train_test_split(config_ids, test_size=test_size, random_state=random_state)
     train_ids, val_ids = train_test_split(train_ids, test_size=val_size/(1-test_size), random_state=random_state)
