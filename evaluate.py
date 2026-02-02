@@ -29,7 +29,7 @@ def evaluate():
 
     # ===== Model =====
     input_channels = full_dataset[0][0].shape[0]  # = 1
-    output_dim = 3
+    output_dim = 1  # Magnitude
 
     model = ODMR_CNN(input_channels, output_dim).to(DEVICE)
     model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
@@ -39,8 +39,8 @@ def evaluate():
 
     # ===== Metrics accumulators =====
     mse_sum = 0.0
-    abs_error_sum = torch.zeros(3, device=DEVICE)
-    sq_error_sum = torch.zeros(3, device=DEVICE)
+    abs_error_sum = 0.0
+    sq_error_sum = 0.0
     n_samples = 0
 
     with torch.no_grad():
@@ -51,133 +51,92 @@ def evaluate():
             pred = model(x)
 
             mse_sum += criterion(pred, y).item() * y.size(0)
-            abs_error_sum += torch.sum(torch.abs(pred - y), dim=0)
-            sq_error_sum += torch.sum((pred - y) ** 2, dim=0)
+            abs_error_sum += torch.sum(torch.abs(pred - y)).item()
+            sq_error_sum += torch.sum((pred - y) ** 2).item()
             n_samples += y.size(0)
 
     # ===== Final metrics =====
     mse = mse_sum / n_samples
     mae = abs_error_sum / n_samples
-    rmse = torch.sqrt(sq_error_sum / n_samples)
+    rmse = np.sqrt(sq_error_sum / n_samples)
 
-    label_range = torch.tensor([
-        full_dataset.metadata["Ax"].max() - full_dataset.metadata["Ax"].min(),
-        full_dataset.metadata["Ay"].max() - full_dataset.metadata["Ay"].min(),
-        full_dataset.metadata["Az"].max() - full_dataset.metadata["Az"].min(),
-    ], dtype=torch.float32, device=DEVICE)
+    # Compute magnitude range from metadata
+    metadata_magnitudes = np.sqrt(full_dataset.metadata["Ax"]**2 + 
+                                  full_dataset.metadata["Ay"]**2 + 
+                                  full_dataset.metadata["Az"]**2)
+    label_range = metadata_magnitudes.max() - metadata_magnitudes.min()
 
     nrmse = rmse / label_range
 
     # ===== Print results =====
-    print("\n===== TEST SET EVALUATION =====")
-    print(f"MSE  : {mse:.3e}")
-    print(f"MAE  : Ax {mae[0]:.3e} | Ay {mae[1]:.3e} | Az {mae[2]:.3e}")
-    print(f"RMSE : Ax {rmse[0]:.3e} | Ay {rmse[1]:.3e} | Az {rmse[2]:.3e}")
-    print(
-        f"NRMSE: Ax {nrmse[0]*100:.2f}% | "
-        f"Ay {nrmse[1]*100:.2f}% | "
-        f"Az {nrmse[2]*100:.2f}%"
-    )
+    print("\n===== TEST SET EVALUATION (Magnitude) =====")
+    print(f"MSE   : {mse:.3e}")
+    print(f"MAE   : {mae:.3e}")
+    print(f"RMSE  : {rmse:.3e}")
+    print(f"NRMSE : {nrmse*100:.2f}%")
 
-    # ===== Plot error heatmaps =====
-    y_true = np.zeros((n_samples, 3), dtype=np.float32)
-    y_pred = np.zeros((n_samples, 3), dtype=np.float32)
+    # ===== Plot predictions vs true values =====
+    y_true = np.zeros(n_samples, dtype=np.float32)
+    y_pred = np.zeros(n_samples, dtype=np.float32)
     idx = 0
     with torch.no_grad():
         for x, y in test_loader:
             batch_size = y.size(0)
             x = x.to(DEVICE)
-            pred = model(x).cpu().numpy()
-            y_true[idx:idx + batch_size, :] = y.cpu().numpy()
-            y_pred[idx:idx + batch_size, :] = pred
+            pred = model(x).cpu().numpy().flatten()
+            y_true[idx:idx + batch_size] = y.cpu().numpy().flatten()
+            y_pred[idx:idx + batch_size] = pred
             idx += batch_size
-    plot_error_heatmaps_IxIy_by_Iz(y_true, y_pred)
+    plot_magnitude_predictions(y_true, y_pred)
 
 
-def plot_error_heatmaps_IxIy_by_Iz(
-    y_true,
-    y_pred,
-    n_bins_xy=40,
-    n_slices_z=4,
-):
+def plot_magnitude_predictions(y_true, y_pred):
     """
-    Plot Ix–Iy heatmaps of 3D prediction error, sliced by Iz.
+    Plot predicted vs true magnitude values.
 
     Parameters
     ----------
-    y_true : np.ndarray, shape (N, 3)
-        True currents (Ix, Iy, Iz)
-    y_pred : np.ndarray, shape (N, 3)
-        Predicted currents (Ix, Iy, Iz)
-    n_bins_xy : int
-        Number of bins for Ix and Iy
-    n_slices_z : int
-        Number of Iz slices
+    y_true : np.ndarray, shape (N,)
+        True magnitude values
+    y_pred : np.ndarray, shape (N,)
+        Predicted magnitude values
     """
-
-    assert y_true.shape == y_pred.shape
-    assert y_true.shape[1] == 3
-
-    Ix, Iy, Iz = y_true[:, 0], y_true[:, 1], y_true[:, 2]
-
-    # 3D Euclidean error
-    error_3d = np.linalg.norm(y_pred - y_true, axis=1)
-
-    # Iz slicing
-    z_edges = np.linspace(Iz.min(), Iz.max(), n_slices_z + 1)
-
-    fig, axes = plt.subplots(
-        1, n_slices_z, figsize=(5 * n_slices_z, 4), sharey=True
-    )
-
-    if n_slices_z == 1:
-        axes = [axes]
-
-    for k in range(n_slices_z):
-        z_min, z_max = z_edges[k], z_edges[k + 1]
-        mask = (Iz >= z_min) & (Iz < z_max)
-
-        if np.sum(mask) < 10:
-            axes[k].set_title(f"Iz ∈ [{z_min:.2e}, {z_max:.2e}]\n(not enough data)")
-            axes[k].axis("off")
-            continue
-
-        # 2D binning: mean error per (Ix, Iy) bin
-        heatmap, xedges, yedges = np.histogram2d(
-            Ix[mask],
-            Iy[mask],
-            bins=n_bins_xy,
-            weights=error_3d[mask],
-        )
-
-        counts, _, _ = np.histogram2d(
-            Ix[mask],
-            Iy[mask],
-            bins=n_bins_xy,
-        )
-
-        heatmap = np.divide(
-            heatmap,
-            counts,
-            out=np.full_like(heatmap, np.nan),
-            where=counts > 0,
-        )
-
-        im = axes[k].imshow(
-            heatmap.T,
-            origin="lower",
-            aspect="auto",
-            extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
-        )
-
-        axes[k].set_title(f"Iz ∈ [{z_min:.2e}, {z_max:.2e}]")
-        axes[k].set_xlabel("Ix")
-
-        if k == 0:
-            axes[k].set_ylabel("Iy")
-
-        fig.colorbar(im, ax=axes[k], label="||ΔI|| (3D error)")
-
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # 1. Scatter plot: Predicted vs True
+    ax = axes[0]
+    ax.scatter(y_true, y_pred, alpha=0.5, s=20)
+    
+    # Perfect prediction line
+    min_val = min(y_true.min(), y_pred.min())
+    max_val = max(y_true.max(), y_pred.max())
+    ax.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Perfect prediction')
+    
+    ax.set_xlabel('True Magnitude')
+    ax.set_ylabel('Predicted Magnitude')
+    ax.set_title('Predicted vs True Magnitude')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_aspect('equal', adjustable='box')
+    
+    # 2. Error distribution
+    ax = axes[1]
+    errors = y_pred - y_true
+    ax.hist(errors, bins=50, alpha=0.7, edgecolor='black')
+    ax.axvline(0, color='r', linestyle='--', linewidth=2, label='Zero error')
+    ax.set_xlabel('Prediction Error')
+    ax.set_ylabel('Frequency')
+    ax.set_title('Error Distribution')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    # Statistics on the plot
+    mean_error = np.mean(errors)
+    std_error = np.std(errors)
+    ax.text(0.05, 0.95, f'Mean: {mean_error:.3e}\nStd: {std_error:.3e}',
+            transform=ax.transAxes, verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
     plt.tight_layout()
     plt.show()
 

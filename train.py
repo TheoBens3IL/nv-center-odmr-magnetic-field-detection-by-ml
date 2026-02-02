@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 import matplotlib.pyplot as plt
 import argparse
+import numpy as np
 from split_dataset import train_val_test_split
 from models import ODMR_CNN
 
@@ -58,14 +59,14 @@ def train(batch_size=16, epochs=200, lr=3e-4, weight_decay=1e-4, dataset_dir="py
 
     full_dataset = train_set.dataset              # full dataset for input/output dimensions
     input_channels = full_dataset[0][0].shape[0]  # = 1
-    output_dim = 3                                # (Ax, Ay, Az)
+    output_dim = 1                                # Magnitude
 
     # Verify datas metrics (min, max, mean) of labels and signals
-    print("Labels statistics:")
+    print("Labels statistics (Magnitude):")
     all_labels = torch.stack([full_dataset[i][1] for i in range(len(full_dataset))], dim=0)
-    print(f"Min: {all_labels.min(dim=0).values}")
-    print(f"Max: {all_labels.max(dim=0).values}")
-    print(f"Mean: {all_labels.mean(dim=0)}")
+    print(f"Min: {all_labels.min().item():.6f}")
+    print(f"Max: {all_labels.max().item():.6f}")
+    print(f"Mean: {all_labels.mean().item():.6f}")
     print("Signals statistics:")
     all_signals = torch.cat([full_dataset[i][0] for i in range(len(full_dataset))], dim=0)
     print(f"Min: {all_signals.min()}")
@@ -94,8 +95,8 @@ def train(batch_size=16, epochs=200, lr=3e-4, weight_decay=1e-4, dataset_dir="py
     history = {
         'train_loss': [],
         'val_loss': [],
-        'nmae_ax': [], 'nmae_ay': [], 'nmae_az': [],
-        'nrmse_ax': [], 'nrmse_ay': [], 'nrmse_az': [],
+        'nmae': [],
+        'nrmse': [],
     }
 
     for epoch in range(EPOCHS):
@@ -132,18 +133,17 @@ def train(batch_size=16, epochs=200, lr=3e-4, weight_decay=1e-4, dataset_dir="py
                 sq_error += torch.mean((pred - y) ** 2, dim=0) * x.size(0)
 
         val_loss /= len(val_loader)  # average validation loss
-        abs_error /= len(val_loader) # MAE per axis
-        rmse = torch.sqrt(sq_error / len(val_loader.dataset)) # RMSE per axis
+        abs_error /= len(val_loader) # MAE
+        rmse = torch.sqrt(sq_error / len(val_loader.dataset)) # RMSE
         
-        # Normalized metrics (by range and by mean)
-        label_range = torch.tensor([full_dataset.metadata["Ax"].max() - full_dataset.metadata["Ax"].min(),
-                                    full_dataset.metadata["Ay"].max() - full_dataset.metadata["Ay"].min(),
-                                    full_dataset.metadata["Az"].max() - full_dataset.metadata["Az"].min()],
-                                    dtype=torch.float32, device=DEVICE)
-        label_mean = torch.tensor([full_dataset.metadata["Ax"].mean(),
-                                   full_dataset.metadata["Ay"].mean(),
-                                   full_dataset.metadata["Az"].mean()],
+        # Compute magnitude range from metadata
+        metadata_magnitudes = np.sqrt(full_dataset.metadata["Ax"]**2 + 
+                                      full_dataset.metadata["Ay"]**2 + 
+                                      full_dataset.metadata["Az"]**2)
+        label_range = torch.tensor(metadata_magnitudes.max() - metadata_magnitudes.min(),
                                    dtype=torch.float32, device=DEVICE)
+        label_mean = torch.tensor(metadata_magnitudes.mean(),
+                                  dtype=torch.float32, device=DEVICE)
         
         nrmse = rmse / label_range  # Normalized RMSE by range
         nmae = abs_error / label_range  # Normalized MAE by range
@@ -152,12 +152,8 @@ def train(batch_size=16, epochs=200, lr=3e-4, weight_decay=1e-4, dataset_dir="py
         # Store metrics for plotting
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
-        history['nmae_ax'].append(nmae[0].item() * 100)
-        history['nmae_ay'].append(nmae[1].item() * 100)
-        history['nmae_az'].append(nmae[2].item() * 100)
-        history['nrmse_ax'].append(nrmse[0].item() * 100)
-        history['nrmse_ay'].append(nrmse[1].item() * 100)
-        history['nrmse_az'].append(nrmse[2].item() * 100)
+        history['nmae'].append(nmae.item() * 100)
+        history['nrmse'].append(nrmse.item() * 100)
 
         # Scheduler step (Cosine annealing updates every epoch)
         scheduler.step()
@@ -167,8 +163,8 @@ def train(batch_size=16, epochs=200, lr=3e-4, weight_decay=1e-4, dataset_dir="py
             f"Epoch {epoch+1:03d} :\n"
             f" -> Train_loss: {train_loss:.3e} | Val_loss: {val_loss:.3e} \n"
             f" -> LR: {optimizer.param_groups[0]['lr']:.2e} \n"
-            f" -> NMAE:  Ax {nmae[0]*100:.2f}%  - Ay {nmae[1]*100:.2f}%  - Az {nmae[2]*100:.2f}% \n"
-            f" -> NRMSE: Ax {nrmse[0]*100:.2f}% - Ay {nrmse[1]*100:.2f}% - Az {nrmse[2]*100:.2f}%"
+            f" -> NMAE:  {nmae.item()*100:.2f}% \n"
+            f" -> NRMSE: {nrmse.item()*100:.2f}%"
         )
 
         # Early stopping check
@@ -194,11 +190,11 @@ def plot_training_history(history, best_loss):
     """Plot training and validation metrics over epochs."""
     epochs = range(1, len(history['train_loss']) + 1)
     
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle('Training Metrics Evolution', fontsize=16, fontweight='bold')
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig.suptitle('Training Metrics Evolution (Magnitude Prediction)', fontsize=16, fontweight='bold')
     
     # 1. Loss curves
-    ax = axes[0, 0]
+    ax = axes[0]
     ax.plot(epochs, history['train_loss'], label='Train Loss', linewidth=2)
     ax.plot(epochs, history['val_loss'], label='Val Loss', linewidth=2)
     ax.set_xlabel('Epoch')
@@ -208,39 +204,21 @@ def plot_training_history(history, best_loss):
     ax.grid(True, alpha=0.3)
     ax.set_yscale('log')
     
-    # 2. NMAE per axis
-    ax = axes[0, 1]
-    ax.plot(epochs, history['nmae_ax'], label='Ax', linewidth=2)
-    ax.plot(epochs, history['nmae_ay'], label='Ay', linewidth=2)
-    ax.plot(epochs, history['nmae_az'], label='Az', linewidth=2)
+    # 2. NMAE
+    ax = axes[1]
+    ax.plot(epochs, history['nmae'], label='NMAE', linewidth=2, color='orange')
     ax.set_xlabel('Epoch')
     ax.set_ylabel('NMAE (%)')
-    ax.set_title('Normalized Mean Absolute Error by Axis')
+    ax.set_title('Normalized Mean Absolute Error')
     ax.legend()
     ax.grid(True, alpha=0.3)
     
-    # 3. NRMSE per axis
-    ax = axes[1, 0]
-    ax.plot(epochs, history['nrmse_ax'], label='Ax', linewidth=2)
-    ax.plot(epochs, history['nrmse_ay'], label='Ay', linewidth=2)
-    ax.plot(epochs, history['nrmse_az'], label='Az', linewidth=2)
+    # 3. NRMSE
+    ax = axes[2]
+    ax.plot(epochs, history['nrmse'], label='NRMSE', linewidth=2, color='green')
     ax.set_xlabel('Epoch')
     ax.set_ylabel('NRMSE (%)')
-    ax.set_title('Normalized Root Mean Square Error by Axis')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    # 4. Average NMAE and NRMSE
-    ax = axes[1, 1]
-    avg_nmae = [(history['nmae_ax'][i] + history['nmae_ay'][i] + history['nmae_az'][i]) / 3 
-                for i in range(len(epochs))]
-    avg_nrmse = [(history['nrmse_ax'][i] + history['nrmse_ay'][i] + history['nrmse_az'][i]) / 3 
-                 for i in range(len(epochs))]
-    ax.plot(epochs, avg_nmae, label='Avg NMAE', linewidth=2)
-    ax.plot(epochs, avg_nrmse, label='Avg NRMSE', linewidth=2)
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('Error (%)')
-    ax.set_title('Average Normalized Errors')
+    ax.set_title('Normalized Root Mean Square Error')
     ax.legend()
     ax.grid(True, alpha=0.3)
     

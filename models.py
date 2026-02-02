@@ -10,7 +10,7 @@ class ODMR_CNN(nn.Module):
         - Fully Connected → ReLU
         - Fully Connected (Output Layer)
     """
-    def __init__(self, n_freq, output_dim=3):
+    def __init__(self, n_freq, output_dim=1):
         super().__init__()
 
         self.features = nn.Sequential(
@@ -40,5 +40,5 @@ class ODMR_CNN(nn.Module):
     def forward(self, x):
         # x: (B, 1, N_freq)
         x = self.features(x)
-        x = x.squeeze(-1)  # (B, 64)
+        x = x.squeeze(-1)  # (B, 128) after AdaptiveAvgPool1d
         return self.regressor(x)

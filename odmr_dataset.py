@@ -11,7 +11,7 @@ class ODMRDataset(Dataset):
 
     Each item:
         X : Tensor (1, N_freq) → 1D spectrum
-        y : Tensor (3,) → (Ax, Ay, Az) : Labels
+        y : Tensor (1,) → Magnitude sqrt(Ax^2 + Ay^2 + Az^2) : Label
     """
 
     def __init__(self, dataset_dir, transform=None):
@@ -37,7 +37,7 @@ class ODMRDataset(Dataset):
         Get spectrum and label for a given index.
         Returns:
             spectrum: Tensor of shape (N_freq,)
-            label: Tensor of shape (3,) corresponding to (Ax, Ay, Az)
+            label: Scalar tensor representing the magnetic field magnitude sqrt(Ax^2 + Ay^2 + Az^2)
         '''
         config_id, mw_idx = self.index_map[idx]  # get config_id and mw_idx for this idx
 
@@ -46,6 +46,7 @@ class ODMRDataset(Dataset):
         spectrum = torch.from_numpy(spectrum).unsqueeze(0)  # add channel dimension → (1, N_freq))
 
         row = self.metadata.iloc[config_id]  # get the metadata row for this configuration
-        label = torch.tensor([row["Ax"], row["Ay"], row["Az"]], dtype=torch.float32)  # get the label (Ax, Ay, Az)
+        magnitude = np.sqrt(row["Ax"]**2 + row["Ay"]**2 + row["Az"]**2)  # calculate magnetic field magnitude
+        label = torch.tensor([magnitude], dtype=torch.float32)  # get the label (magnitude)
 
         return spectrum, label
