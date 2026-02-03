@@ -16,6 +16,8 @@ class ODMR_CNN(nn.Module):
     - Moderate capacity to avoid overfitting
     - BatchNorm and Dropout for regularization
     """
+    requires_multi_config = False  # Expects input shape (batch, 1, 201)
+    
     def __init__(self, n_freq=201, output_dim=3):
         super().__init__()
 
@@ -90,6 +92,8 @@ class ODMR_CNN_Compact(nn.Module):
     
     Good baseline for comparison - fewer parameters but still effective.
     """
+    requires_multi_config = False  # Expects input shape (batch, 1, 201)
+    
     def __init__(self, n_freq=201, output_dim=3):
         super().__init__()
 
@@ -131,6 +135,8 @@ from torch import nn
 
 # A deeper CNN model to capture local patterns on frequency 
 class ODMR_CNN_Deep(nn.Module):
+    requires_multi_config = True  # Expects input shape (batch, 10, 201)
+    
     def __init__(self, n_channels=10, n_freq=201, output_dim=3):
         super().__init__()
         self.conv_layers = nn.Sequential(
@@ -168,6 +174,8 @@ class ODMR_CNN_Deep(nn.Module):
 # A model with frequency-wise attention mechanism (adaptative ponderation of frequency points)
 class FrequencyAttention(nn.Module):
     """Simple frequency-wise attention"""
+    requires_multi_config = True  # Expects input shape (batch, 10, 201)
+    
     def __init__(self, n_channels=10, n_freq=201, output_dim=3):
         super().__init__()
         self.conv = nn.Sequential(
@@ -204,6 +212,8 @@ class FrequencyAttention(nn.Module):
 # A model that processes each MW configuration separately and then aggregates
 class MWConfig_CNN(nn.Module):
     """1D Conv + MW configs aggregation"""
+    requires_multi_config = True  # Expects input shape (batch, 10, 201)
+    
     def __init__(self, n_channels=10, n_freq=201, output_dim=3):
         super().__init__()
         # Treat each MW config separately

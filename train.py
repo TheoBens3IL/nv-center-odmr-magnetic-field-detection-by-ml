@@ -42,7 +42,26 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
     WEIGHT_DECAY = weight_decay
     MODEL_NAME = model_name
 
-    train_set, val_set, test_set = train_val_test_split(DATASET_DIR)
+    # Check if model requires multi-config input
+    available_models = {
+        'ODMR_CNN': models.ODMR_CNN,
+        'ODMR_CNN_Compact': models.ODMR_CNN_Compact,
+        'ODMR_CNN_Deep': models.ODMR_CNN_Deep,
+        'FrequencyAttention': models.FrequencyAttention,
+        'MWConfig_CNN': models.MWConfig_CNN,
+    }
+    
+    if MODEL_NAME not in available_models:
+        raise ValueError(f"Unknown model: {MODEL_NAME}. Available models: {list(available_models.keys())}")
+    
+    model_class = available_models[MODEL_NAME]
+    use_multi_config = model_class.requires_multi_config
+    
+    print(f"Model: {MODEL_NAME}")
+    print(f"Input format: {'Multi-config (10, 201)' if use_multi_config else 'Single-config (1, 201)'}")
+    print()
+
+    train_set, val_set, test_set = train_val_test_split(DATASET_DIR, multi_config=use_multi_config)
 
     train_loader = DataLoader(
         train_set,
@@ -66,7 +85,11 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
     print(f"  Train: {len(train_set)} samples")
     print(f"  Val:   {len(val_set)} samples")
     print(f"  Test:  {len(test_set)} samples")
-    print(f"  Total: {len(train_set) + len(val_set) + len(test_set)} samples\n")
+    print(f"  Total: {len(train_set) + len(val_set) + len(test_set)} samples")
+    
+    # Show expected input shape
+    sample_x, _ = full_dataset[0]
+    print(f"  Input shape per sample: {tuple(sample_x.shape)}\\n")
     
     # Load normalization stats for denormalization during evaluation
     norm_stats = load_normalization_stats(DATASET_DIR)
@@ -90,18 +113,9 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
     print(f"Std: {all_signals.std()}\n")
 
     # Create model based on model_name
-    available_models = {
-        'ODMR_CNN': models.ODMR_CNN,
-        'ODMR_CNN_Compact': models.ODMR_CNN_Compact,
-        'ODMR_CNN_Deep': models.ODMR_CNN_Deep,
-        'FrequencyAttention': models.FrequencyAttention,
-        'MWConfig_CNN': models.MWConfig_CNN,
-    }
-    
     if MODEL_NAME not in available_models:
         raise ValueError(f"Unknown model: {MODEL_NAME}. Available models: {list(available_models.keys())}")
     
-    model_class = available_models[MODEL_NAME]
     model = model_class(n_freq=201, output_dim=output_dim).to(DEVICE)
     
     print(f"Model: {MODEL_NAME}")
