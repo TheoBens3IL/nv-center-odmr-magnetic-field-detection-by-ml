@@ -4,8 +4,10 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 import matplotlib.pyplot as plt
 import argparse
+import numpy as np
 from split_dataset import train_val_test_split
-from models import ODMR_CNN
+from utils import load_normalization_stats, denormalize_labels
+import models  # Import the models module
 
 class EarlyStopping:
     '''
@@ -30,14 +32,15 @@ class EarlyStopping:
         return self.counter >= self.patience           # return True if early stopping criterion met  
 
 
-def train(batch_size=32, epochs=200, lr=5e-4, weight_decay=1e-4, dataset_dir="dataset_multi_mw", 
-          patience=20, min_delta=1e-6):
+def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="dataset_multi_mw", 
+          patience=20, min_delta=1e-6, model_name="ODMR_CNN_Compact"):
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     DATASET_DIR = dataset_dir
-    BATCH_SIZE = batch_size  # Increased for larger dataset (21k samples)
+    BATCH_SIZE = batch_size
     EPOCHS = epochs
-    LR = lr        # Slightly higher LR for faster convergence with more data
+    LR = lr
     WEIGHT_DECAY = weight_decay
+    MODEL_NAME = model_name
 
     train_set, val_set, test_set = train_val_test_split(DATASET_DIR)
 
@@ -64,23 +67,45 @@ def train(batch_size=32, epochs=200, lr=5e-4, weight_decay=1e-4, dataset_dir="da
     print(f"  Val:   {len(val_set)} samples")
     print(f"  Test:  {len(test_set)} samples")
     print(f"  Total: {len(train_set) + len(val_set) + len(test_set)} samples\n")
+    
+    # Load normalization stats for denormalization during evaluation
+    norm_stats = load_normalization_stats(DATASET_DIR)
+    labels_mean = norm_stats['labels_mean']
+    labels_std = norm_stats['labels_std']
+    print(f"Label normalization stats loaded:")
+    print(f"  Mean: {labels_mean}")
+    print(f"  Std:  {labels_std}\n")
 
     # Verify datas metrics (min, max, mean) of labels and signals
-    print("Labels statistics:")
+    print("NORMALIZED labels statistics (from dataset):")
     all_labels = torch.stack([full_dataset[i][1] for i in range(len(full_dataset))], dim=0)
     print(f"Min: {all_labels.min(dim=0).values}")
     print(f"Max: {all_labels.max(dim=0).values}")
     print(f"Mean: {all_labels.mean(dim=0)}")
+    print(f"Std: {all_labels.std(dim=0)}")
     print("Signals statistics:")
     all_signals = torch.cat([full_dataset[i][0] for i in range(len(full_dataset))], dim=0)
     print(f"Min: {all_signals.min()}")
     print(f"Max: {all_signals.max()}")
     print(f"Std: {all_signals.std()}\n")
 
-    # Use compact model - better for this dataset size
-    from models import ODMR_CNN_Compact
-    model = ODMR_CNN_Compact(n_freq=201, output_dim=output_dim).to(DEVICE)
-    print(f"Model created with {sum(p.numel() for p in model.parameters()):,} parameters")
+    # Create model based on model_name
+    available_models = {
+        'ODMR_CNN': models.ODMR_CNN,
+        'ODMR_CNN_Compact': models.ODMR_CNN_Compact,
+        'ODMR_CNN_Deep': models.ODMR_CNN_Deep,
+        'FrequencyAttention': models.FrequencyAttention,
+        'MWConfig_CNN': models.MWConfig_CNN,
+    }
+    
+    if MODEL_NAME not in available_models:
+        raise ValueError(f"Unknown model: {MODEL_NAME}. Available models: {list(available_models.keys())}")
+    
+    model_class = available_models[MODEL_NAME]
+    model = model_class(n_freq=201, output_dim=output_dim).to(DEVICE)
+    
+    print(f"Model: {MODEL_NAME}")
+    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
     print(f"Parameter to data ratio: 1:{len(train_set) / sum(p.numel() for p in model.parameters()):.2f}")
     print(f"Training on device: {DEVICE}\n")
     
@@ -126,35 +151,37 @@ def train(batch_size=32, epochs=200, lr=5e-4, weight_decay=1e-4, dataset_dir="da
 
         # ===== Validation Phase ===== #
         model.eval()
-        val_loss = 0.0   # validation loss
-        abs_error = 0.0  # for mean absolute error per component
-        sq_error = 0.0   # for root mean square error per component
+        val_loss = 0.0   # validation loss on normalized labels
+        abs_error_denorm = torch.zeros(3)  # MAE in original scale
+        sq_error_denorm = 0.0   # MSE in original scale
+        n_samples = 0
+        
         with torch.no_grad(): # disable gradient computation for validation
             for x, y in val_loader:
                 x = x.to(DEVICE)
                 y = y.to(DEVICE)
                 pred = model(x)
+                
+                # Loss on normalized labels (for training)
                 val_loss += criterion(pred, y).item()
-                abs_error += torch.mean(torch.abs(pred - y), dim=0)
-                sq_error += torch.mean((pred - y) ** 2, dim=0) * x.size(0)
+                
+                # Denormalize for evaluation metrics in original scale
+                pred_denorm = denormalize_labels(pred.cpu(), labels_mean, labels_std)
+                y_denorm = denormalize_labels(y.cpu(), labels_mean, labels_std)
+                
+                abs_error_denorm += torch.sum(torch.abs(pred_denorm - y_denorm), dim=0)
+                sq_error_denorm += torch.sum((pred_denorm - y_denorm) ** 2, dim=0)
+                n_samples += x.size(0)
 
-        val_loss /= len(val_loader)  # average validation loss
-        abs_error /= len(val_loader) # MAE per axis
-        rmse = torch.sqrt(sq_error / len(val_loader.dataset)) # RMSE per axis
+        val_loss /= len(val_loader)  # average validation loss (normalized)
+        mae_denorm = abs_error_denorm / n_samples  # MAE per axis (original scale)
+        rmse_denorm = torch.sqrt(sq_error_denorm / n_samples)  # RMSE per axis (original scale)
         
-        # Normalized metrics (by range and by mean)
-        label_range = torch.tensor([full_dataset.metadata["Ax"].max() - full_dataset.metadata["Ax"].min(),
-                                    full_dataset.metadata["Ay"].max() - full_dataset.metadata["Ay"].min(),
-                                    full_dataset.metadata["Az"].max() - full_dataset.metadata["Az"].min()],
-                                    dtype=torch.float32, device=DEVICE)
-        label_mean = torch.tensor([full_dataset.metadata["Ax"].mean(),
-                                   full_dataset.metadata["Ay"].mean(),
-                                   full_dataset.metadata["Az"].mean()],
-                                   dtype=torch.float32, device=DEVICE)
+        # Normalized metrics (NMAE, NRMSE) using original scale std
+        label_range_tensor = torch.tensor(labels_std * 6, dtype=torch.float32)  # ~3 sigma range
         
-        nrmse = rmse / label_range  # Normalized RMSE by range
-        nmae = abs_error / label_range  # Normalized MAE by range
-        mae_rel_mean = abs_error / torch.abs(label_mean)  # MAE relative to mean
+        nrmse = rmse_denorm / label_range_tensor  # Normalized RMSE by range
+        nmae = mae_denorm / label_range_tensor  # Normalized MAE by range
 
         # Store metrics for plotting
         history['train_loss'].append(train_loss)
@@ -265,15 +292,20 @@ def plot_training_history(history, best_loss):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train ODMR CNN model for magnetic field detection')
     
+    # Model selection
+    parser.add_argument('--model', type=str, default='ODMR_CNN_Compact',
+                        choices=['ODMR_CNN', 'ODMR_CNN_Compact', 'ODMR_CNN_Deep', 'FrequencyAttention', 'MWConfig_CNN'],
+                        help='Model architecture to use (default: ODMR_CNN_Compact)')
+    
     # Training hyperparameters
     parser.add_argument('--batch_size', type=int, default=32, 
                         help='Batch size for training (default: 32)')
     parser.add_argument('--epochs', type=int, default=200, 
                         help='Maximum number of training epochs (default: 200)')
-    parser.add_argument('--lr', type=float, default=5e-4, 
-                        help='Learning rate (default: 5e-4)')
-    parser.add_argument('--weight_decay', type=float, default=1e-4, 
-                        help='Weight decay for optimizer (default: 1e-4)')
+    parser.add_argument('--lr', type=float, default=2e-4, 
+                        help='Learning rate (default: 2e-4)')
+    parser.add_argument('--weight_decay', type=float, default=5e-4, 
+                        help='Weight decay for optimizer (default: 5e-4)')
     
     # Early stopping parameters
     parser.add_argument('--patience', type=int, default=20, 
@@ -290,6 +322,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("Training Configuration:")
     print("=" * 60)
+    print(f"Model:          {args.model}")
     print(f"Batch size:     {args.batch_size}")
     print(f"Epochs:         {args.epochs}")
     print(f"Learning rate:  {args.lr}")
@@ -307,5 +340,6 @@ if __name__ == "__main__":
         weight_decay=args.weight_decay,
         dataset_dir=args.dataset_dir,
         patience=args.patience,
-        min_delta=args.min_delta
+        min_delta=args.min_delta,
+        model_name=args.model
     )

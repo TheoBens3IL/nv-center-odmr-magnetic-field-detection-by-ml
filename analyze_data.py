@@ -1,28 +1,36 @@
 import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr
+import matplotlib.pyplot as plt
 
 # Analyser les corrélations entre labels et caractéristiques spectrales
-metadata = pd.read_csv("pytorch_dataset_example/metadata.csv")
+DATASET_DIR = "dataset_multi_mw"
+metadata = pd.read_csv(f"{DATASET_DIR}/metadata.csv")
 
 # Extraire des features simples de chaque spectre
 features = []
+all_signals = []  # Store all signals for frequency-wise correlation
+
 for i in range(len(metadata)):
-    sig = np.load(f"pytorch_dataset_example/signals/config_{i:03d}.npy").flatten()
+    sig = np.load(f"{DATASET_DIR}/signals/config_{i:04d}.npy")  # Shape: (10, 201)
+    # Average over MW configs to get one spectrum per experiment
+    sig_avg = sig.mean(axis=0)  # Shape: (201,)
+    all_signals.append(sig_avg)
     
     # Features statistiques
-    mean_val = sig.mean()
-    std_val = sig.std()
-    min_val = sig.min()
-    max_val = sig.max()
+    mean_val = sig_avg.mean()
+    std_val = sig_avg.std()
+    min_val = sig_avg.min()
+    max_val = sig_avg.max()
     range_val = max_val - min_val
     
     # Position et amplitude du minimum (dip principal)
-    min_idx = sig.argmin()
+    min_idx = sig_avg.argmin()
     
     features.append([mean_val, std_val, min_val, max_val, range_val, min_idx])
 
 features = np.array(features)
+all_signals = np.array(all_signals)  # Shape: (num_experiments, 201)
 
 # Calculer les corrélations entre features et labels
 print("=== CORRELATIONS FEATURES -> LABELS ===")
@@ -50,5 +58,79 @@ for lname in label_names:
 
 total_mse_baseline = sum([((metadata[lname] - metadata[lname].mean()) ** 2).mean() for lname in label_names]) / 3
 print(f"\nTotal MSE baseline (predicting mean): {total_mse_baseline:.4f}")
-print(f"Current model MSE: ~0.146")
-print(f"Improvement over baseline: {(1 - 0.146/total_mse_baseline)*100:.1f}%")
+
+
+# ========================================
+# FREQUENCY-WISE CORRELATION ANALYSIS
+# ========================================
+print("\n" + "="*60)
+print("=== FREQUENCY-WISE CORRELATION ANALYSIS ===")
+print("="*60)
+
+def feature_label_corr(all_signals, all_labels):
+    """
+    Compute correlation between each frequency point and each label.
+    
+    Parameters:
+        all_signals : array (num_samples, n_freq)
+        all_labels : array (num_samples, 3)
+    
+    Returns:
+        corr_matrix : array (n_freq, 3) - correlation of each freq with Ax, Ay, Az
+    """
+    n_freq = all_signals.shape[1]
+    corr_matrix = np.zeros((n_freq, all_labels.shape[1]))
+
+    for i in range(n_freq):
+        for j in range(all_labels.shape[1]):
+            corr_matrix[i, j] = np.corrcoef(all_signals[:, i], all_labels[:, j])[0, 1]
+    
+    return corr_matrix  # shape (n_freq, 3)
+
+# Extract labels
+all_labels = metadata[['Ax', 'Ay', 'Az']].values
+
+# Compute correlations
+corrs = feature_label_corr(all_signals, all_labels)
+
+print("\nCorrelation min/max per axis:")
+for idx, axis in enumerate(['Ax', 'Ay', 'Az']):
+    print(f"{axis}: min={corrs[:, idx].min():+.4f}, max={corrs[:, idx].max():+.4f}, mean_abs={np.abs(corrs[:, idx]).mean():.4f}")
+
+# Find most correlated frequencies for each axis
+print("\nMost correlated frequencies (top 5) for each axis:")
+frequencies = np.load(f"{DATASET_DIR}/frequencies.npy") / 1e9  # Convert to GHz
+
+for idx, axis in enumerate(['Ax', 'Ay', 'Az']):
+    abs_corrs = np.abs(corrs[:, idx])
+    top_indices = np.argsort(abs_corrs)[-5:][::-1]
+    
+    print(f"\n{axis}:")
+    for i, freq_idx in enumerate(top_indices, 1):
+        freq_ghz = frequencies[freq_idx]
+        corr_val = corrs[freq_idx, idx]
+        print(f"  {i}. Freq {freq_ghz:.3f} GHz (idx {freq_idx}): corr = {corr_val:+.4f}")
+
+# Plot correlation heatmap
+print("\nGenerating correlation heatmap...")
+fig, axes = plt.subplots(3, 1, figsize=(12, 8), sharex=True)
+fig.suptitle('Frequency-wise Correlation with Current Components', fontsize=14, fontweight='bold')
+
+for idx, (ax, axis) in enumerate(zip(axes, ['Ax', 'Ay', 'Az'])):
+    ax.plot(frequencies, corrs[:, idx], linewidth=1.5)
+    ax.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+    ax.set_ylabel(f'Correlation\nwith {axis}', fontsize=11)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(-1, 1)
+    
+    # Highlight most correlated region
+    max_corr_idx = np.argmax(np.abs(corrs[:, idx]))
+    ax.axvline(x=frequencies[max_corr_idx], color='r', linestyle=':', alpha=0.5, 
+               label=f'Max |corr| @ {frequencies[max_corr_idx]:.3f} GHz')
+    ax.legend(loc='upper right', fontsize=9)
+
+axes[-1].set_xlabel('Frequency (GHz)', fontsize=11)
+plt.tight_layout()
+plt.savefig('frequency_correlation_analysis.png', dpi=150, bbox_inches='tight')
+print("Saved plot to: frequency_correlation_analysis.png")
+plt.show()

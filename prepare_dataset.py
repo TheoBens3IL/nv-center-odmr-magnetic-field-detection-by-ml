@@ -39,7 +39,7 @@ def load_currents(currents_file):
     return Ax, Ay, Az
 
 
-def load_esr_raw_multi_mw(esr_file):
+def load_esr_multi_mw(esr_file):
     """
     Load raw ESR data from SPLIT file with 10 MW configurations.
     
@@ -147,7 +147,7 @@ def create_pytorch_dataset(dataset_dir, output_dir):
     
     # Process first file to get frequencies
     print("\nProcessing first file to extract frequencies...")
-    frequencies, _ = load_esr_raw_multi_mw(split_files[0])
+    frequencies, _ = load_esr_multi_mw(split_files[0])
     
     # Save frequencies
     freq_path = output_dir / 'frequencies.npy'
@@ -161,7 +161,7 @@ def create_pytorch_dataset(dataset_dir, output_dir):
     all_signals = []
     
     for split_path in tqdm(split_files, desc="Loading signals"):
-        _, signals = load_esr_raw_multi_mw(split_path)  # Shape: (10, 201)
+        _, signals = load_esr_multi_mw(split_path)  # Shape: (10, 201)
         all_signals.append(signals)
     
     # Stack all signals: (2109, 10, 201)
@@ -171,12 +171,36 @@ def create_pytorch_dataset(dataset_dir, output_dir):
     # Apply global normalization
     all_signals = normalize_global(all_signals)
     
-    # Create metadata DataFrame
+    # Create metadata DataFrame with NORMALIZED labels
+    # Compute normalization stats
+    labels_mean = np.array([Ax[:len(split_files)].mean(), 
+                           Ay[:len(split_files)].mean(), 
+                           Az[:len(split_files)].mean()], dtype=np.float32)
+    labels_std = np.array([Ax[:len(split_files)].std(), 
+                          Ay[:len(split_files)].std(), 
+                          Az[:len(split_files)].std()], dtype=np.float32)
+    
+    print(f"\nLabels normalization stats:")
+    print(f"  Mean: Ax={labels_mean[0]:.4f}, Ay={labels_mean[1]:.4f}, Az={labels_mean[2]:.4f}")
+    print(f"  Std:  Ax={labels_std[0]:.4f}, Ay={labels_std[1]:.4f}, Az={labels_std[2]:.4f}")
+    
+    # Save normalization stats for later denormalization
+    normalization_stats = {
+        'labels_mean': labels_mean,
+        'labels_std': labels_std
+    }
+    np.save(output_dir / 'normalization_stats.npy', normalization_stats)
+    
+    # Normalize labels
+    Ax_norm = (Ax[:len(split_files)] - labels_mean[0]) / (labels_std[0] + 1e-8)
+    Ay_norm = (Ay[:len(split_files)] - labels_mean[1]) / (labels_std[1] + 1e-8)
+    Az_norm = (Az[:len(split_files)] - labels_mean[2]) / (labels_std[2] + 1e-8)
+    
     metadata = pd.DataFrame({
         'experiment_id': range(len(split_files)),
-        'Ax': Ax[:len(split_files)].astype(np.float32),
-        'Ay': Ay[:len(split_files)].astype(np.float32),
-        'Az': Az[:len(split_files)].astype(np.float32)
+        'Ax': Ax_norm.astype(np.float32),
+        'Ay': Ay_norm.astype(np.float32),
+        'Az': Az_norm.astype(np.float32)
     })
     
     # Save metadata
@@ -194,14 +218,19 @@ def create_pytorch_dataset(dataset_dir, output_dir):
     print(f"Dataset creation complete!")
     print(f"{'='*60}")
     print(f"Output directory: {output_dir}")
-    print(f"  - metadata.csv: {len(metadata)} experiments")
+    print(f"  - metadata.csv: {len(metadata)} experiments (NORMALIZED labels)")
     print(f"  - frequencies.npy: {len(frequencies)} frequencies")
+    print(f"  - normalization_stats.npy: label normalization parameters")
     print(f"  - signals/: {len(split_files)} files, each with shape (10, 201)")
     print(f"\nSignal statistics:")
     print(f"  Min: {all_signals.min():.4f}")
     print(f"  Max: {all_signals.max():.4f}")
     print(f"  Mean: {all_signals.mean():.4f}")
     print(f"  Std: {all_signals.std():.4f}")
+    print(f"\nNormalized labels statistics:")
+    print(f"  Ax - Min: {metadata['Ax'].min():.4f}, Max: {metadata['Ax'].max():.4f}, Mean: {metadata['Ax'].mean():.4f}, Std: {metadata['Ax'].std():.4f}")
+    print(f"  Ay - Min: {metadata['Ay'].min():.4f}, Max: {metadata['Ay'].max():.4f}, Mean: {metadata['Ay'].mean():.4f}, Std: {metadata['Ay'].std():.4f}")
+    print(f"  Az - Min: {metadata['Az'].min():.4f}, Max: {metadata['Az'].max():.4f}, Mean: {metadata['Az'].mean():.4f}, Std: {metadata['Az'].std():.4f}")
 
 
 def verify_dataset(output_dir):
@@ -224,7 +253,15 @@ def verify_dataset(output_dir):
     print(f"\nMetadata CSV:")
     print(f"  Shape: {metadata.shape}")
     print(f"  Columns: {list(metadata.columns)}")
-    print(f"  Sample:\n{metadata.head()}")
+    print(f"  Sample (NORMALIZED labels):\n{metadata.head()}")
+    
+    # Check normalization stats
+    stats_path = output_dir / 'normalization_stats.npy'
+    if stats_path.exists():
+        stats = np.load(stats_path, allow_pickle=True).item()
+        print(f"\nNormalization stats:")
+        print(f"  Labels mean: {stats['labels_mean']}")
+        print(f"  Labels std:  {stats['labels_std']}")
     
     # Check frequencies
     freq_path = output_dir / 'frequencies.npy'
