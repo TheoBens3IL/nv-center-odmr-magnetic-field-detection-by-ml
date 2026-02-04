@@ -16,6 +16,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
+import argparse
 
 
 def load_currents(currents_file):
@@ -36,6 +37,58 @@ def load_currents(currents_file):
     Ay = data.iloc[1].values
     Az = data.iloc[2].values
 
+    return Ax, Ay, Az
+
+
+def cartesian_to_spherical(Ax, Ay, Az):
+    """
+    Convert cartesian current coordinates (Ax, Ay, Az) to spherical (Ar, theta, phi).
+    
+    Parameters:
+        Ax, Ay, Az : np.ndarray
+            Cartesian current components
+    
+    Returns:
+        tuple : (Ar, theta, phi)
+            Ar : radial magnitude (0 to infinity)
+            theta : elevation angle from z-axis (0 to π)
+            phi : azimuthal angle in xy-plane (-π to π)
+    
+    Notes:
+        - Ar = sqrt(Ax² + Ay² + Az²)
+        - theta = arccos(Az/Ar)  [0, π]
+        - phi = arctan2(Ay, Ax)  [-π, π]
+        - Singularity handling: when Ar~0, set theta=phi=0
+    """
+    Ar = np.sqrt(Ax**2 + Ay**2 + Az**2)
+    
+    # Handle singularity when Ar is very small
+    theta = np.zeros_like(Ar)
+    phi = np.zeros_like(Ar)
+    
+    # Only compute angles where magnitude is significant
+    mask = Ar > 1e-8
+    theta[mask] = np.arccos(np.clip(Az[mask] / Ar[mask], -1.0, 1.0))
+    phi[mask] = np.arctan2(Ay[mask], Ax[mask])
+    
+    return Ar, theta, phi
+
+
+def spherical_to_cartesian(Ar, theta, phi):
+    """
+    Convert spherical coordinates back to cartesian (for verification/denormalization).
+    
+    Parameters:
+        Ar, theta, phi : np.ndarray
+            Spherical coordinates
+    
+    Returns:
+        tuple : (Ax, Ay, Az)
+    """
+    Ax = Ar * np.sin(theta) * np.cos(phi)
+    Ay = Ar * np.sin(theta) * np.sin(phi)
+    Az = Ar * np.cos(theta)
+    
     return Ax, Ay, Az
 
 
@@ -112,9 +165,17 @@ def normalize_global(signals):
     return (signals - global_mean) / (global_std + 1e-8)
 
 
-def create_pytorch_dataset(dataset_dir, output_dir):
+def create_pytorch_dataset(dataset_dir, output_dir, coordinate_system='cartesian'):
     """
-    Process entire multi-MW dataset and save in PyTorch-compatible format.
+    Process raw ODMR data into PyTorch-compatible format.
+    
+    Parameters:
+        dataset_dir : str or Path
+            Directory containing raw data (currents CSV + ESR SPLIT files)
+        output_dir : str or Path
+            Output directory for processed dataset
+        coordinate_system : str
+            'cartesian' for (Ax, Ay, Az) or 'spherical' for (Ar, theta, phi)
     
     Parameters:
         dataset_dir : str or Path
@@ -144,6 +205,19 @@ def create_pytorch_dataset(dataset_dir, output_dir):
     # Load currents
     Ax, Ay, Az = load_currents(currents_csv)
     print(f"Loaded currents for {len(Ax)} experiments")
+    
+    # Convert to spherical if requested
+    if coordinate_system == 'spherical':
+        print(f"\nConverting to spherical coordinates...")
+        Ar, theta, phi = cartesian_to_spherical(Ax, Ay, Az)
+        print(f"  Ar range: [{Ar.min():.4f}, {Ar.max():.4f}]")
+        print(f"  theta range: [{theta.min():.4f}, {theta.max():.4f}] (should be [0, π])")
+        print(f"  phi range: [{phi.min():.4f}, {phi.max():.4f}] (should be [-π, π])")
+        # Replace Ax, Ay, Az with spherical coordinates
+        Ax, Ay, Az = Ar, theta, phi
+        label_names = ['Ar', 'theta', 'phi']
+    else:
+        label_names = ['Ax', 'Ay', 'Az']
     
     # Process first file to get frequencies
     print("\nProcessing first file to extract frequencies...")
@@ -177,25 +251,37 @@ def create_pytorch_dataset(dataset_dir, output_dir):
                            Ay[:len(split_files)].mean(), 
                            Az[:len(split_files)].mean()], dtype=np.float32)
     
-    # Use GLOBAL std (max of all components) to preserve physical proportions
-    # This prevents artificially amplifying Ax (which varies less physically)
-    ax_std = Ax[:len(split_files)].std()
-    ay_std = Ay[:len(split_files)].std()
-    az_std = Az[:len(split_files)].std()
-    global_std = max(ax_std, ay_std, az_std)
-    
-    labels_std = np.array([global_std, global_std, global_std], dtype=np.float32)
-    
-    print(f"\nLabels normalization stats (GLOBAL NORMALIZATION):")
-    print(f"  Mean: Ax={labels_mean[0]:.4f}, Ay={labels_mean[1]:.4f}, Az={labels_mean[2]:.4f}")
-    print(f"  Individual std: Ax={ax_std:.4f}, Ay={ay_std:.4f}, Az={az_std:.4f}")
-    print(f"  Global std used: {global_std:.4f} (preserves physical proportions)")
-    print(f"  Result: Normalized std will be Ax≈{ax_std/global_std:.2f}, Ay≈{ay_std/global_std:.2f}, Az≈{az_std/global_std:.2f}")
+    if coordinate_system == 'spherical':
+        # Spherical normalization: different strategy
+        # Ar: use its std (magnitude)
+        # theta: normalize to [0,1] by dividing by π
+        # phi: normalize to [-1,1] by dividing by π
+        ar_std = Ax[:len(split_files)].std()  # Ax now contains Ar
+        labels_std = np.array([ar_std, np.pi, np.pi], dtype=np.float32)
+        print(f"\nLabels normalization stats (SPHERICAL):")
+        print(f"  Mean: Ar={labels_mean[0]:.4f}, theta={labels_mean[1]:.4f}, phi={labels_mean[2]:.4f}")
+        print(f"  Std: Ar={ar_std:.4f}, theta/π=1.0, phi/π=1.0")
+    else:
+        # Use GLOBAL std (max of all components) to preserve physical proportions
+        # This prevents artificially amplifying Ax (which varies less physically)
+        ax_std = Ax[:len(split_files)].std()
+        ay_std = Ay[:len(split_files)].std()
+        az_std = Az[:len(split_files)].std()
+        global_std = max(ax_std, ay_std, az_std)
+        
+        labels_std = np.array([global_std, global_std, global_std], dtype=np.float32)
+        
+        print(f"\nLabels normalization stats (GLOBAL NORMALIZATION):")
+        print(f"  Mean: Ax={labels_mean[0]:.4f}, Ay={labels_mean[1]:.4f}, Az={labels_mean[2]:.4f}")
+        print(f"  Individual std: Ax={ax_std:.4f}, Ay={ay_std:.4f}, Az={az_std:.4f}")
+        print(f"  Global std used: {global_std:.4f} (preserves physical proportions)")
+        print(f"  Result: Normalized std will be Ax≈{ax_std/global_std:.2f}, Ay≈{ay_std/global_std:.2f}, Az≈{az_std/global_std:.2f}")
     
     # Save normalization stats for later denormalization
     normalization_stats = {
         'labels_mean': labels_mean,
-        'labels_std': labels_std
+        'labels_std': labels_std,
+        'coordinate_system': coordinate_system
     }
     np.save(output_dir / 'normalization_stats.npy', normalization_stats)
     
@@ -206,9 +292,9 @@ def create_pytorch_dataset(dataset_dir, output_dir):
     
     metadata = pd.DataFrame({
         'experiment_id': range(len(split_files)),
-        'Ax': Ax_norm.astype(np.float32),
-        'Ay': Ay_norm.astype(np.float32),
-        'Az': Az_norm.astype(np.float32)
+        label_names[0]: Ax_norm.astype(np.float32),
+        label_names[1]: Ay_norm.astype(np.float32),
+        label_names[2]: Az_norm.astype(np.float32)
     })
     
     # Save metadata
@@ -236,9 +322,9 @@ def create_pytorch_dataset(dataset_dir, output_dir):
     print(f"  Mean: {all_signals.mean():.4f}")
     print(f"  Std: {all_signals.std():.4f}")
     print(f"\nNormalized labels statistics:")
-    print(f"  Ax - Min: {metadata['Ax'].min():.4f}, Max: {metadata['Ax'].max():.4f}, Mean: {metadata['Ax'].mean():.4f}, Std: {metadata['Ax'].std():.4f}")
-    print(f"  Ay - Min: {metadata['Ay'].min():.4f}, Max: {metadata['Ay'].max():.4f}, Mean: {metadata['Ay'].mean():.4f}, Std: {metadata['Ay'].std():.4f}")
-    print(f"  Az - Min: {metadata['Az'].min():.4f}, Max: {metadata['Az'].max():.4f}, Mean: {metadata['Az'].mean():.4f}, Std: {metadata['Az'].std():.4f}")
+    print(f"  {label_names[0]} - Min: {metadata[label_names[0]].min():.4f}, Max: {metadata[label_names[0]].max():.4f}, Mean: {metadata[label_names[0]].mean():.4f}, Std: {metadata[label_names[0]].std():.4f}")
+    print(f"  {label_names[1]} - Min: {metadata[label_names[1]].min():.4f}, Max: {metadata[label_names[1]].max():.4f}, Mean: {metadata[label_names[1]].mean():.4f}, Std: {metadata[label_names[1]].std():.4f}")
+    print(f"  {label_names[2]} - Min: {metadata[label_names[2]].min():.4f}, Max: {metadata[label_names[2]].max():.4f}, Mean: {metadata[label_names[2]].mean():.4f}, Std: {metadata[label_names[2]].std():.4f}")
 
 
 def verify_dataset(output_dir):
@@ -297,15 +383,34 @@ def verify_dataset(output_dir):
 def main():
     """Main function to process the dataset."""
     
-    # Set paths
-    DATASET_DIR = "dataset_10ElliptConf"
-    OUTPUT_DIR = "dataset_multi_mw"
+    parser = argparse.ArgumentParser(description='Prepare ODMR dataset for training')
+    parser.add_argument('--coordinate_system', type=str, default='cartesian',
+                       choices=['cartesian', 'spherical'],
+                       help='Coordinate system for current labels: cartesian (Ax,Ay,Az) or spherical (Ar,theta,phi)')
+    parser.add_argument('--dataset_dir', type=str, default='dataset_10ElliptConf',
+                       help='Input directory with raw data')
+    
+    args = parser.parse_args()
+    
+    # Set output directory based on coordinate system
+    if args.coordinate_system == 'spherical':
+        output_dir = 'dataset_multi_mw_spherical'
+    else:
+        output_dir = 'dataset_multi_mw'
+    
+    print(f"\n{'='*60}")
+    print(f"DATASET PREPARATION")
+    print(f"{'='*60}")
+    print(f"Coordinate system: {args.coordinate_system.upper()}")
+    print(f"Input directory: {args.dataset_dir}")
+    print(f"Output directory: {output_dir}")
+    print(f"{'='*60}\n")
     
     # Create dataset
-    create_pytorch_dataset(DATASET_DIR, OUTPUT_DIR)
+    create_pytorch_dataset(args.dataset_dir, output_dir, args.coordinate_system)
     
     # Verify
-    verify_dataset(OUTPUT_DIR)
+    verify_dataset(output_dir)
 
 
 if __name__ == "__main__":

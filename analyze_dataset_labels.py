@@ -7,13 +7,27 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import os
 from scipy.stats import pearsonr
+from utils import load_normalization_stats, denormalize_labels
 
 def analyze_dataset(dataset_dir="dataset_multi_mw"):
     """Analyze the multi-MW dataset for predictability of each component."""
     
-    print("=" * 60)
-    print("DATASET ANALYSIS: Predictability of Ax, Ay, Az")
-    print("=" * 60)
+    # Detect coordinate system from normalization stats
+    norm_stats = load_normalization_stats(dataset_dir)
+    coord_system = norm_stats.get('coordinate_system', 'cartesian')
+    labels_mean = norm_stats['labels_mean']
+    labels_std = norm_stats['labels_std']
+    
+    if coord_system == 'spherical':
+        label_names = ['Ar', 'theta', 'phi']
+        print("=" * 60)
+        print("DATASET ANALYSIS: Predictability of Ar, theta, phi (SPHERICAL)")
+        print("=" * 60)
+    else:
+        label_names = ['Ax', 'Ay', 'Az']
+        print("=" * 60)
+        print("DATASET ANALYSIS: Predictability of Ax, Ay, Az")
+        print("=" * 60)
     
     # Load metadata
     metadata = pd.read_csv(Path(dataset_dir) / "metadata.csv")
@@ -21,22 +35,31 @@ def analyze_dataset(dataset_dir="dataset_multi_mw"):
     
     print(f"\nTotal experiments (different current configurations): {len(metadata)}")
     
-    # Load labels
-    Ax = metadata['Ax'].values
-    Ay = metadata['Ay'].values
-    Az = metadata['Az'].values
+    # Load labels (dynamically based on coordinate system) - these are NORMALIZED
+    labels_norm = np.stack([
+        metadata[label_names[0]].values,
+        metadata[label_names[1]].values,
+        metadata[label_names[2]].values
+    ], axis=1)  # Shape (N, 3)
+    
+    # Denormalize to original scale
+    labels_denorm = denormalize_labels(labels_norm, labels_mean, labels_std)
+    Ax = labels_denorm[:, 0]
+    Ay = labels_denorm[:, 1]
+    Az = labels_denorm[:, 2]
     
     # Statistics on labels
     print("\n" + "=" * 60)
     print("LABEL STATISTICS (Original scale)")
     print("=" * 60)
-    for name, data in [('Ax', Ax), ('Ay', Ay), ('Az', Az)]:
+    for name, data in [(label_names[0], Ax), (label_names[1], Ay), (label_names[2], Az)]:
+        unit = " A" if coord_system == 'cartesian' else (" A" if name == 'Ar' else " rad")
         print(f"\n{name}:")
-        print(f"  Mean: {data.mean():+.4f} A")
-        print(f"  Std:  {data.std():.4f} A")
-        print(f"  Min:  {data.min():+.4f} A")
-        print(f"  Max:  {data.max():+.4f} A")
-        print(f"  Range: {data.max() - data.min():.4f} A")
+        print(f"  Mean: {data.mean():+.4f}{unit}")
+        print(f"  Std:  {data.std():.4f}{unit}")
+        print(f"  Min:  {data.min():+.4f}{unit}")
+        print(f"  Max:  {data.max():+.4f}{unit}")
+        print(f"  Range: {data.max() - data.min():.4f}{unit}")
     
     # Label correlations
     print("\n" + "=" * 60)
@@ -46,9 +69,9 @@ def analyze_dataset(dataset_dir="dataset_multi_mw"):
     corr_ax_az, _ = pearsonr(Ax, Az)
     corr_ay_az, _ = pearsonr(Ay, Az)
     
-    print(f"Ax vs Ay: r = {corr_ax_ay:+.4f}")
-    print(f"Ax vs Az: r = {corr_ax_az:+.4f}")
-    print(f"Ay vs Az: r = {corr_ay_az:+.4f}")
+    print(f"{label_names[0]} vs {label_names[1]}: r = {corr_ax_ay:+.4f}")
+    print(f"{label_names[0]} vs {label_names[2]}: r = {corr_ax_az:+.4f}")
+    print(f"{label_names[1]} vs {label_names[2]}: r = {corr_ay_az:+.4f}")
     
     # ==================================================================================
     # ANALYSIS 1: Individual signals (as used in ODMRDataset - single-config models)
@@ -64,7 +87,7 @@ def analyze_dataset(dataset_dir="dataset_multi_mw"):
     
     # Flatten all signals: treat each MW config as independent sample
     all_individual_signals = []
-    all_individual_labels = {'Ax': [], 'Ay': [], 'Az': []}
+    all_individual_labels = {label_names[0]: [], label_names[1]: [], label_names[2]: []}
     
     for idx in range(len(metadata)):
         config_id = int(metadata.iloc[idx]['experiment_id'])
@@ -73,9 +96,9 @@ def analyze_dataset(dataset_dir="dataset_multi_mw"):
         # Each of 10 MW configs becomes a separate sample
         for mw_idx in range(10):
             all_individual_signals.append(signals[mw_idx, :])
-            all_individual_labels['Ax'].append(Ax[idx])
-            all_individual_labels['Ay'].append(Ay[idx])
-            all_individual_labels['Az'].append(Az[idx])
+            all_individual_labels[label_names[0]].append(Ax[idx])
+            all_individual_labels[label_names[1]].append(Ay[idx])
+            all_individual_labels[label_names[2]].append(Az[idx])
     
     all_individual_signals = np.array(all_individual_signals)  # (21090, 201)
     
@@ -83,9 +106,9 @@ def analyze_dataset(dataset_dir="dataset_multi_mw"):
     
     # Compute correlations for pooled data
     max_corr_pooled = np.zeros(3)
-    for label_idx, (name, label_data) in enumerate([('Ax', all_individual_labels['Ax']), 
-                                                    ('Ay', all_individual_labels['Ay']), 
-                                                    ('Az', all_individual_labels['Az'])]):
+    for label_idx, (name, label_data) in enumerate([(label_names[0], all_individual_labels[label_names[0]]), 
+                                                    (label_names[1], all_individual_labels[label_names[1]]), 
+                                                    (label_names[2], all_individual_labels[label_names[2]])]):
         corrs = []
         for freq_idx in range(n_freq):
             corr, _ = pearsonr(all_individual_signals[:, freq_idx], label_data)
@@ -93,9 +116,9 @@ def analyze_dataset(dataset_dir="dataset_multi_mw"):
         max_corr_pooled[label_idx] = max(corrs)
     
     print(f"\nMaximum |correlation| when pooling all MW configs together:")
-    print(f"  Ax: |r| = {max_corr_pooled[0]:.4f}")
-    print(f"  Ay: |r| = {max_corr_pooled[1]:.4f}")
-    print(f"  Az: |r| = {max_corr_pooled[2]:.4f}")
+    print(f"  {label_names[0]}: |r| = {max_corr_pooled[0]:.4f}")
+    print(f"  {label_names[1]}: |r| = {max_corr_pooled[1]:.4f}")
+    print(f"  {label_names[2]}: |r| = {max_corr_pooled[2]:.4f}")
     
     # ==================================================================================
     # ANALYSIS 2: Per-MW-config (as used in ODMRDatasetMultiConfig - multi-config models)
@@ -243,4 +266,6 @@ def analyze_dataset(dataset_dir="dataset_multi_mw"):
 
 
 if __name__ == "__main__":
-    analyze_dataset("dataset_multi_mw")
+    import sys
+    dataset_dir = sys.argv[1] if len(sys.argv) > 1 else "dataset_multi_mw"
+    analyze_dataset(dataset_dir)
