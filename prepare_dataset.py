@@ -176,13 +176,21 @@ def create_pytorch_dataset(dataset_dir, output_dir):
     labels_mean = np.array([Ax[:len(split_files)].mean(), 
                            Ay[:len(split_files)].mean(), 
                            Az[:len(split_files)].mean()], dtype=np.float32)
-    labels_std = np.array([Ax[:len(split_files)].std(), 
-                          Ay[:len(split_files)].std(), 
-                          Az[:len(split_files)].std()], dtype=np.float32)
     
-    print(f"\nLabels normalization stats:")
+    # Use GLOBAL std (max of all components) to preserve physical proportions
+    # This prevents artificially amplifying Ax (which varies less physically)
+    ax_std = Ax[:len(split_files)].std()
+    ay_std = Ay[:len(split_files)].std()
+    az_std = Az[:len(split_files)].std()
+    global_std = max(ax_std, ay_std, az_std)
+    
+    labels_std = np.array([global_std, global_std, global_std], dtype=np.float32)
+    
+    print(f"\nLabels normalization stats (GLOBAL NORMALIZATION):")
     print(f"  Mean: Ax={labels_mean[0]:.4f}, Ay={labels_mean[1]:.4f}, Az={labels_mean[2]:.4f}")
-    print(f"  Std:  Ax={labels_std[0]:.4f}, Ay={labels_std[1]:.4f}, Az={labels_std[2]:.4f}")
+    print(f"  Individual std: Ax={ax_std:.4f}, Ay={ay_std:.4f}, Az={az_std:.4f}")
+    print(f"  Global std used: {global_std:.4f} (preserves physical proportions)")
+    print(f"  Result: Normalized std will be Ax≈{ax_std/global_std:.2f}, Ay≈{ay_std/global_std:.2f}, Az≈{az_std/global_std:.2f}")
     
     # Save normalization stats for later denormalization
     normalization_stats = {
