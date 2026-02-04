@@ -221,12 +221,19 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
         scheduler.step()
         current_lr = optimizer.param_groups[0]['lr']
 
+        # Format units for display
+        if coord_system == 'spherical':
+            units = ['A', 'rad', 'rad']
+        else:
+            units = ['A', 'A', 'A']
+
         print(
             f"Epoch {epoch+1:03d} :\n"
             f" -> Train_loss: {train_loss:.3e} | Val_loss: {val_loss:.3e} \n"
             f" -> LR: {optimizer.param_groups[0]['lr']:.2e} \n"
-            f" -> NMAE:  {label_names[0]} {nmae[0]*100:.2f}%  - {label_names[1]} {nmae[1]*100:.2f}%  - {label_names[2]} {nmae[2]*100:.2f}% \n"
-            f" -> NRMSE: {label_names[0]} {nrmse[0]*100:.2f}% - {label_names[1]} {nrmse[1]*100:.2f}% - {label_names[2]} {nrmse[2]*100:.2f}%"
+            f" -> MAE (abs): {label_names[0]} {mae_denorm[0]:.4f}{units[0]} - {label_names[1]} {mae_denorm[1]:.4f}{units[1]} - {label_names[2]} {mae_denorm[2]:.4f}{units[2]} \n"
+            f" -> NMAE:      {label_names[0]} {nmae[0]*100:.2f}%  - {label_names[1]} {nmae[1]*100:.2f}%  - {label_names[2]} {nmae[2]*100:.2f}% \n"
+            f" -> NRMSE:     {label_names[0]} {nrmse[0]*100:.2f}% - {label_names[1]} {nrmse[1]*100:.2f}% - {label_names[2]} {nrmse[2]*100:.2f}%"
         )
 
         # Early stopping check
