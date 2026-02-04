@@ -245,10 +245,10 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
     print(f"Best model saved as {model_path} (val_loss: {early_stopping.best_loss:.3e})")
 
     # Plot training history
-    plot_training_history(history, early_stopping.best_loss)
+    plot_training_history(history, early_stopping.best_loss, label_names)
 
 
-def plot_training_history(history, best_loss):
+def plot_training_history(history, best_loss, label_names=['Ax', 'Ay', 'Az']):
     """Plot training and validation metrics over epochs."""
     epochs = range(1, len(history['train_loss']) + 1)
     
@@ -268,9 +268,9 @@ def plot_training_history(history, best_loss):
     
     # 2. NMAE per axis
     ax = axes[0, 1]
-    ax.plot(epochs, history['nmae_ax'], label='Ax', linewidth=2)
-    ax.plot(epochs, history['nmae_ay'], label='Ay', linewidth=2)
-    ax.plot(epochs, history['nmae_az'], label='Az', linewidth=2)
+    ax.plot(epochs, history[f'nmae_{label_names[0].lower()}'], label=label_names[0], linewidth=2)
+    ax.plot(epochs, history[f'nmae_{label_names[1].lower()}'], label=label_names[1], linewidth=2)
+    ax.plot(epochs, history[f'nmae_{label_names[2].lower()}'], label=label_names[2], linewidth=2)
     ax.set_xlabel('Epoch')
     ax.set_ylabel('NMAE (%)')
     ax.set_title('Normalized Mean Absolute Error by Axis')
@@ -279,9 +279,9 @@ def plot_training_history(history, best_loss):
     
     # 3. NRMSE per axis
     ax = axes[1, 0]
-    ax.plot(epochs, history['nrmse_ax'], label='Ax', linewidth=2)
-    ax.plot(epochs, history['nrmse_ay'], label='Ay', linewidth=2)
-    ax.plot(epochs, history['nrmse_az'], label='Az', linewidth=2)
+    ax.plot(epochs, history[f'nrmse_{label_names[0].lower()}'], label=label_names[0], linewidth=2)
+    ax.plot(epochs, history[f'nrmse_{label_names[1].lower()}'], label=label_names[1], linewidth=2)
+    ax.plot(epochs, history[f'nrmse_{label_names[2].lower()}'], label=label_names[2], linewidth=2)
     ax.set_xlabel('Epoch')
     ax.set_ylabel('NRMSE (%)')
     ax.set_title('Normalized Root Mean Square Error by Axis')
@@ -290,9 +290,9 @@ def plot_training_history(history, best_loss):
     
     # 4. Average NMAE and NRMSE
     ax = axes[1, 1]
-    avg_nmae = [(history['nmae_ax'][i] + history['nmae_ay'][i] + history['nmae_az'][i]) / 3 
+    avg_nmae = [(history[f'nmae_{label_names[0].lower()}'][i] + history[f'nmae_{label_names[1].lower()}'][i] + history[f'nmae_{label_names[2].lower()}'][i]) / 3 
                 for i in range(len(epochs))]
-    avg_nrmse = [(history['nrmse_ax'][i] + history['nrmse_ay'][i] + history['nrmse_az'][i]) / 3 
+    avg_nrmse = [(history[f'nrmse_{label_names[0].lower()}'][i] + history[f'nrmse_{label_names[1].lower()}'][i] + history[f'nrmse_{label_names[2].lower()}'][i]) / 3 
                  for i in range(len(epochs))]
     ax.plot(epochs, avg_nmae, label='Avg NMAE', linewidth=2)
     ax.plot(epochs, avg_nrmse, label='Avg NRMSE', linewidth=2)

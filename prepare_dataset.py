@@ -252,15 +252,17 @@ def create_pytorch_dataset(dataset_dir, output_dir, coordinate_system='cartesian
                            Az[:len(split_files)].mean()], dtype=np.float32)
     
     if coordinate_system == 'spherical':
-        # Spherical normalization: different strategy
-        # Ar: use its std (magnitude)
-        # theta: normalize to [0,1] by dividing by π
-        # phi: normalize to [-1,1] by dividing by π
-        ar_std = Ax[:len(split_files)].std()  # Ax now contains Ar
-        labels_std = np.array([ar_std, np.pi, np.pi], dtype=np.float32)
+        # Spherical normalization: use actual std for all components
+        # This ensures proper metric calculation during training
+        ar_std = Ax[:len(split_files)].std()      # Ax now contains Ar
+        theta_std = Ay[:len(split_files)].std()   # Ay now contains theta
+        phi_std = Az[:len(split_files)].std()     # Az now contains phi
+        
+        labels_std = np.array([ar_std, theta_std, phi_std], dtype=np.float32)
         print(f"\nLabels normalization stats (SPHERICAL):")
         print(f"  Mean: Ar={labels_mean[0]:.4f}, theta={labels_mean[1]:.4f}, phi={labels_mean[2]:.4f}")
-        print(f"  Std: Ar={ar_std:.4f}, theta/π=1.0, phi/π=1.0")
+        print(f"  Std: Ar={ar_std:.4f}, theta={theta_std:.4f}, phi={phi_std:.4f}")
+        print(f"  Note: theta range [0, π], phi range [-π, π]")
     else:
         # Use GLOBAL std (max of all components) to preserve physical proportions
         # This prevents artificially amplifying Ax (which varies less physically)
