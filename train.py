@@ -95,6 +95,16 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
     norm_stats = load_normalization_stats(DATASET_DIR)
     labels_mean = norm_stats['labels_mean']
     labels_std = norm_stats['labels_std']
+    coord_system = norm_stats.get('coordinate_system', 'cartesian')
+    
+    # Set label names based on coordinate system
+    if coord_system == 'spherical':
+        label_names = ['Ar', 'theta', 'phi']
+        print(f"Coordinate system: SPHERICAL (Ar, theta, phi)")
+    else:
+        label_names = ['Ax', 'Ay', 'Az']
+        print(f"Coordinate system: CARTESIAN (Ax, Ay, Az)")
+    
     print(f"Label normalization stats loaded:")
     print(f"  Mean: {labels_mean}")
     print(f"  Std:  {labels_std}\n")
@@ -140,8 +150,8 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
     history = {
         'train_loss': [],
         'val_loss': [],
-        'nmae_ax': [], 'nmae_ay': [], 'nmae_az': [],
-        'nrmse_ax': [], 'nrmse_ay': [], 'nrmse_az': [],
+        f'nmae_{label_names[0].lower()}': [], f'nmae_{label_names[1].lower()}': [], f'nmae_{label_names[2].lower()}': [],
+        f'nrmse_{label_names[0].lower()}': [], f'nrmse_{label_names[1].lower()}': [], f'nrmse_{label_names[2].lower()}': [],
     }
 
     for epoch in range(EPOCHS):
@@ -200,12 +210,12 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
         # Store metrics for plotting
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
-        history['nmae_ax'].append(nmae[0].item() * 100)
-        history['nmae_ay'].append(nmae[1].item() * 100)
-        history['nmae_az'].append(nmae[2].item() * 100)
-        history['nrmse_ax'].append(nrmse[0].item() * 100)
-        history['nrmse_ay'].append(nrmse[1].item() * 100)
-        history['nrmse_az'].append(nrmse[2].item() * 100)
+        history[f'nmae_{label_names[0].lower()}'].append(nmae[0].item() * 100)
+        history[f'nmae_{label_names[1].lower()}'].append(nmae[1].item() * 100)
+        history[f'nmae_{label_names[2].lower()}'].append(nmae[2].item() * 100)
+        history[f'nrmse_{label_names[0].lower()}'].append(nrmse[0].item() * 100)
+        history[f'nrmse_{label_names[1].lower()}'].append(nrmse[1].item() * 100)
+        history[f'nrmse_{label_names[2].lower()}'].append(nrmse[2].item() * 100)
 
         # Scheduler step (Cosine annealing updates every epoch)
         scheduler.step()
@@ -215,8 +225,8 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
             f"Epoch {epoch+1:03d} :\n"
             f" -> Train_loss: {train_loss:.3e} | Val_loss: {val_loss:.3e} \n"
             f" -> LR: {optimizer.param_groups[0]['lr']:.2e} \n"
-            f" -> NMAE:  Ax {nmae[0]*100:.2f}%  - Ay {nmae[1]*100:.2f}%  - Az {nmae[2]*100:.2f}% \n"
-            f" -> NRMSE: Ax {nrmse[0]*100:.2f}% - Ay {nrmse[1]*100:.2f}% - Az {nrmse[2]*100:.2f}%"
+            f" -> NMAE:  {label_names[0]} {nmae[0]*100:.2f}%  - {label_names[1]} {nmae[1]*100:.2f}%  - {label_names[2]} {nmae[2]*100:.2f}% \n"
+            f" -> NRMSE: {label_names[0]} {nrmse[0]*100:.2f}% - {label_names[1]} {nrmse[1]*100:.2f}% - {label_names[2]} {nrmse[2]*100:.2f}%"
         )
 
         # Early stopping check

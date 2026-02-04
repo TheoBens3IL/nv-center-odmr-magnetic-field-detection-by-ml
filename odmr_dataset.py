@@ -20,6 +20,14 @@ class ODMRDataset(Dataset):
         self.signals_dir = os.path.join(self.dataset_dir, "signals")
         self.metadata = pd.read_csv(os.path.join(self.dataset_dir, "metadata.csv"))
         self.transform = transform
+        
+        # Detect label columns (cartesian or spherical)
+        if 'Ax' in self.metadata.columns:
+            self.label_cols = ['Ax', 'Ay', 'Az']
+        elif 'Ar' in self.metadata.columns:
+            self.label_cols = ['Ar', 'theta', 'phi']
+        else:
+            raise ValueError("Could not find label columns (Ax/Ay/Az or Ar/theta/phi)")
 
         # Create mapping: global index -> (config_id, signal_id) , to associate each signal to its current configuration (label)
         self.index_map = []
@@ -46,6 +54,6 @@ class ODMRDataset(Dataset):
         spectrum = torch.from_numpy(spectrum).unsqueeze(0)  # add channel dimension → (1, N_freq))
 
         row = self.metadata[self.metadata["experiment_id"] == config_id].iloc[0]  # get the metadata row for this configuration (use experiment_id)
-        label = torch.tensor([row["Ax"], row["Ay"], row["Az"]], dtype=torch.float32)  # get the label (Ax, Ay, Az)
+        label = torch.tensor([row[self.label_cols[0]], row[self.label_cols[1]], row[self.label_cols[2]]], dtype=torch.float32)  # get the label
 
         return spectrum, label

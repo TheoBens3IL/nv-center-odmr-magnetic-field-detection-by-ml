@@ -20,6 +20,14 @@ class ODMRDatasetMultiConfig(Dataset):
         self.signals_dir = os.path.join(self.dataset_dir, "signals")
         self.metadata = pd.read_csv(os.path.join(self.dataset_dir, "metadata.csv"))
         self.transform = transform
+        
+        # Detect label columns (cartesian or spherical)
+        if 'Ax' in self.metadata.columns:
+            self.label_cols = ['Ax', 'Ay', 'Az']
+        elif 'Ar' in self.metadata.columns:
+            self.label_cols = ['Ar', 'theta', 'phi']
+        else:
+            raise ValueError("Could not find label columns (Ax/Ay/Az or Ar/theta/phi)")
 
     def __len__(self):
         return len(self.metadata)
@@ -38,6 +46,6 @@ class ODMRDatasetMultiConfig(Dataset):
         signals = np.load(os.path.join(self.signals_dir, f"config_{config_id:04d}.npy"))  # (10, 201)
         spectrum = torch.from_numpy(signals).float()  # (10, N_freq)
 
-        label = torch.tensor([row["Ax"], row["Ay"], row["Az"]], dtype=torch.float32)
+        label = torch.tensor([row[self.label_cols[0]], row[self.label_cols[1]], row[self.label_cols[2]]], dtype=torch.float32)
 
         return spectrum, label
