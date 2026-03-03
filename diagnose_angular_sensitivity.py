@@ -7,6 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 from pathlib import Path
+import os
 from scipy.stats import pearsonr
 
 def analyze_angular_sensitivity(dataset_dir="dataset_multi_mw_spherical"):
@@ -14,6 +15,8 @@ def analyze_angular_sensitivity(dataset_dir="dataset_multi_mw_spherical"):
     Check if ODMR signals actually change when theta/phi change but Ar is constant.
     This tests if the elliptical MW configs are sensitive to direction.
     """
+    
+    dataset_dir = os.path.join("datasets_pytorch", dataset_dir)
     
     # Load data
     metadata = pd.read_csv(Path(dataset_dir) / "metadata.csv")

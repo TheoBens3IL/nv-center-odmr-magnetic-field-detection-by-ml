@@ -2,9 +2,13 @@ import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr
 import matplotlib.pyplot as plt
+import os
 
-# Analyser les corrélations entre labels et caractéristiques spectrales
-DATASET_DIR = "dataset_multi_mw"
+'''
+Analyse linear correlations between features extracted from spectra and the current components (Ax, Ay, Az).
+'''
+
+DATASET_DIR = os.path.join("datasets_pytorch", "dataset_multi_mw_2")
 metadata = pd.read_csv(f"{DATASET_DIR}/metadata.csv")
 
 # Extraire des features simples de chaque spectre
@@ -131,6 +135,5 @@ for idx, (ax, axis) in enumerate(zip(axes, ['Ax', 'Ay', 'Az'])):
 
 axes[-1].set_xlabel('Frequency (GHz)', fontsize=11)
 plt.tight_layout()
-plt.savefig('frequency_correlation_analysis.png', dpi=150, bbox_inches='tight')
 print("Saved plot to: frequency_correlation_analysis.png")
 plt.show()

@@ -1,5 +1,3 @@
-dataset_example/
 __pycache__/
 *.pyc
-analyse_data.py
-dataset_10ElliptConf/
+datasets_raw/

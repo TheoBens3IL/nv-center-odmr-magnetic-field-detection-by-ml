@@ -1,186 +1,160 @@
+import os
 import torch
-from torch import nn
-from torch.utils.data import DataLoader
-from pathlib import Path
 import numpy as np
-import matplotlib.pyplot as plt
+import argparse
+from pathlib import Path
+from utils import load_normalization_stats, denormalize_labels
+import models
+from dataset import train_val_test_split
+import json
 
-from split_dataset import train_val_test_split
-from models import ODMR_CNN
+'''
+Evaluate a trained model on the test set and report metrics.
+All metrics are computed on denormalized predictions and labels for interpretability (real units).
+'''
 
+def evaluate_model(model_name, model_dir=None, dataset_dir=None, device='cpu', show=True):
+    # Paths
+    if model_dir is None:
+        # Utilise models_trained/{dataset_dir}/{model_name}
+        if dataset_dir is None:
+            raise FileNotFoundError("No dataset_dir provided for model path resolution.")
+        model_dir = Path("models_trained") / Path(dataset_dir) / model_name.lower()
+    else:
+        model_dir = Path(model_dir)
+    model_path = model_dir / f"{model_name.lower()}_best_model.pth"
+    log_path = model_dir / f"{model_name.lower()}_train_log.json"
+    scaler_path = model_dir / f"{model_name.lower()}_scaler.json"
 
-def evaluate():
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    DATASET_DIR = "pytorch_dataset_example"
-    MODEL_PATH = Path("saved_models/cnn_odmr_best.pt")
-    BATCH_SIZE = 64
+    # Load config from log
+    if log_path.exists():
+        with open(log_path, 'r') as f:
+            log = json.load(f)
+        dataset_dir = log['config']['dataset_dir'] if dataset_dir is None else dataset_dir
+    else:
+        if dataset_dir is None:
+            raise FileNotFoundError("No log file found and no dataset_dir provided.")
 
-    # ===== Dataset =====
-    train_set, val_set, test_set = train_val_test_split(DATASET_DIR)
+    # Correction: n'ajoute 'datasets_pytorch' que si nécessaire
+    if dataset_dir is not None:
+        if not (dataset_dir.startswith('datasets_pytorch') or os.path.isabs(dataset_dir)):
+            dataset_dir = os.path.join("datasets_pytorch", dataset_dir)
 
-    test_loader = DataLoader(
-        test_set,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=4,
-    )
+    # Load normalization stats
+    norm_stats = load_normalization_stats(dataset_dir)
+    labels_mean = norm_stats['labels_mean']
+    labels_std = norm_stats['labels_std']
+    coord_system = norm_stats.get('coordinate_system', 'cartesian')
+    label_names = ['Ar', 'theta', 'phi'] if coord_system == 'spherical' else ['Ax', 'Ay', 'Az']
 
-    full_dataset = train_set.dataset
+    # Load test set
+    train_set, val_set, test_set = train_val_test_split(dataset_dir, multi_config=models.__dict__[model_name].requires_multi_config)
+    test_loader = torch.utils.data.DataLoader(test_set, batch_size=64, shuffle=False, num_workers=0)
 
-    # ===== Model =====
-    input_channels = full_dataset[0][0].shape[0]  # = 1
-    output_dim = 3
-
-    model = ODMR_CNN(input_channels, output_dim).to(DEVICE)
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+    # Load model
+    model_class = models.__dict__[model_name]
+    if model_name == 'HybridODMRPredictor':
+        # Use_attention from log if available
+        use_attention = log['config'].get('use_attention', False) if log_path.exists() else False
+        model = model_class(n_freq=201, use_attention=use_attention)
+    else:
+        model = model_class(n_freq=201, output_dim=3)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.to(device)
     model.eval()
 
-    criterion = nn.MSELoss(reduction="mean")
-
-    # ===== Metrics accumulators =====
-    mse_sum = 0.0
-    abs_error_sum = torch.zeros(3, device=DEVICE)
-    sq_error_sum = torch.zeros(3, device=DEVICE)
-    n_samples = 0
-
+    # Evaluation
+    all_preds = []
+    all_labels = []
     with torch.no_grad():
         for x, y in test_loader:
-            x = x.to(DEVICE)
-            y = y.to(DEVICE)
-
+            x = x.to(device)
+            y = y.to(device)
             pred = model(x)
+            all_preds.append(pred.cpu())
+            all_labels.append(y.cpu())
+    y_pred = torch.cat(all_preds, dim=0)
+    y_true = torch.cat(all_labels, dim=0)
 
-            mse_sum += criterion(pred, y).item() * y.size(0)
-            abs_error_sum += torch.sum(torch.abs(pred - y), dim=0)
-            sq_error_sum += torch.sum((pred - y) ** 2, dim=0)
-            n_samples += y.size(0)
+    # Denormalize
+    y_pred_denorm = denormalize_labels(y_pred, labels_mean, labels_std).numpy()
+    y_true_denorm = denormalize_labels(y_true, labels_mean, labels_std).numpy()
 
-    # ===== Final metrics =====
-    mse = mse_sum / n_samples
-    mae = abs_error_sum / n_samples
-    rmse = torch.sqrt(sq_error_sum / n_samples)
+    # Metrics
+    results = {}
+    units = ['A', 'A', 'A'] if coord_system == 'cartesian' else ['A', 'rad', 'rad']
+    for i, name in enumerate(label_names):
+        mae = float(np.abs(y_pred_denorm[:, i] - y_true_denorm[:, i]).mean())
+        mean_abs = float(np.abs(y_true_denorm[:, i]).mean())
+        std = float(np.std(y_true_denorm[:, i]))
+        if show:
+            print(f"Mean Abs = {mean_abs:.3f} {units[i]}, Std = {std:.3f} {units[i]}")
+        val_range = float(np.max(y_true_denorm[:, i]) - np.min(y_true_denorm[:, i]))
+        rmse = float(np.sqrt(((y_pred_denorm[:, i] - y_true_denorm[:, i]) ** 2).mean()))
+        # Normalisations
+        nmae_mean = (mae / (mean_abs + 1e-8)) * 100
+        nmae_std = (mae / (std + 1e-8)) * 100
+        nmae_range = (mae / (val_range + 1e-8)) * 100
+        nrmse_mean = (rmse / (mean_abs + 1e-8)) * 100
+        nrmse_std = (rmse / (std + 1e-8)) * 100
+        nrmse_range = (rmse / (val_range + 1e-8)) * 100
+        from sklearn.metrics import r2_score
+        r2 = float(r2_score(y_true_denorm[:, i], y_pred_denorm[:, i]))
+        results[name] = {
+            'MAE': round(mae, 3),
+            'RMSE': round(rmse, 3),
+            'NMAE_mean': round(nmae_mean, 3),
+            'NMAE_std': round(nmae_std, 3),
+            'NMAE_range': round(nmae_range, 3),
+            'NRMSE_mean': round(nrmse_mean, 3),
+            'NRMSE_std': round(nrmse_std, 3),
+            'NRMSE_range': round(nrmse_range, 3),
+            'R²': round(r2, 3)
+        }
 
-    label_range = torch.tensor([
-        full_dataset.metadata["Ax"].max() - full_dataset.metadata["Ax"].min(),
-        full_dataset.metadata["Ay"].max() - full_dataset.metadata["Ay"].min(),
-        full_dataset.metadata["Az"].max() - full_dataset.metadata["Az"].min(),
-    ], dtype=torch.float32, device=DEVICE)
-
-    nrmse = rmse / label_range
-
-    # ===== Print results =====
-    print("\n===== TEST SET EVALUATION =====")
-    print(f"MSE  : {mse:.3e}")
-    print(f"MAE  : Ax {mae[0]:.3e} | Ay {mae[1]:.3e} | Az {mae[2]:.3e}")
-    print(f"RMSE : Ax {rmse[0]:.3e} | Ay {rmse[1]:.3e} | Az {rmse[2]:.3e}")
-    print(
-        f"NRMSE: Ax {nrmse[0]*100:.2f}% | "
-        f"Ay {nrmse[1]*100:.2f}% | "
-        f"Az {nrmse[2]*100:.2f}%"
-    )
-
-    # ===== Plot error heatmaps =====
-    y_true = np.zeros((n_samples, 3), dtype=np.float32)
-    y_pred = np.zeros((n_samples, 3), dtype=np.float32)
-    idx = 0
-    with torch.no_grad():
-        for x, y in test_loader:
-            batch_size = y.size(0)
-            x = x.to(DEVICE)
-            pred = model(x).cpu().numpy()
-            y_true[idx:idx + batch_size, :] = y.cpu().numpy()
-            y_pred[idx:idx + batch_size, :] = pred
-            idx += batch_size
-    plot_error_heatmaps_IxIy_by_Iz(y_true, y_pred)
-
-
-def plot_error_heatmaps_IxIy_by_Iz(
-    y_true,
-    y_pred,
-    n_bins_xy=40,
-    n_slices_z=4,
-):
-    """
-    Plot Ix–Iy heatmaps of 3D prediction error, sliced by Iz.
-
-    Parameters
-    ----------
-    y_true : np.ndarray, shape (N, 3)
-        True currents (Ix, Iy, Iz)
-    y_pred : np.ndarray, shape (N, 3)
-        Predicted currents (Ix, Iy, Iz)
-    n_bins_xy : int
-        Number of bins for Ix and Iy
-    n_slices_z : int
-        Number of Iz slices
-    """
-
-    assert y_true.shape == y_pred.shape
-    assert y_true.shape[1] == 3
-
-    Ix, Iy, Iz = y_true[:, 0], y_true[:, 1], y_true[:, 2]
-
-    # 3D Euclidean error
-    error_3d = np.linalg.norm(y_pred - y_true, axis=1)
-
-    # Iz slicing
-    z_edges = np.linspace(Iz.min(), Iz.max(), n_slices_z + 1)
-
-    fig, axes = plt.subplots(
-        1, n_slices_z, figsize=(5 * n_slices_z, 4), sharey=True
-    )
-
-    if n_slices_z == 1:
-        axes = [axes]
-
-    for k in range(n_slices_z):
-        z_min, z_max = z_edges[k], z_edges[k + 1]
-        mask = (Iz >= z_min) & (Iz < z_max)
-
-        if np.sum(mask) < 10:
-            axes[k].set_title(f"Iz ∈ [{z_min:.2e}, {z_max:.2e}]\n(not enough data)")
-            axes[k].axis("off")
-            continue
-
-        # 2D binning: mean error per (Ix, Iy) bin
-        heatmap, xedges, yedges = np.histogram2d(
-            Ix[mask],
-            Iy[mask],
-            bins=n_bins_xy,
-            weights=error_3d[mask],
-        )
-
-        counts, _, _ = np.histogram2d(
-            Ix[mask],
-            Iy[mask],
-            bins=n_bins_xy,
-        )
-
-        heatmap = np.divide(
-            heatmap,
-            counts,
-            out=np.full_like(heatmap, np.nan),
-            where=counts > 0,
-        )
-
-        im = axes[k].imshow(
-            heatmap.T,
-            origin="lower",
-            aspect="auto",
-            extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
-        )
-
-        axes[k].set_title(f"Iz ∈ [{z_min:.2e}, {z_max:.2e}]")
-        axes[k].set_xlabel("Ix")
-
-        if k == 0:
-            axes[k].set_ylabel("Iy")
-
-        fig.colorbar(im, ax=axes[k], label="||ΔI|| (3D error)")
-
-    plt.tight_layout()
-    plt.show()
+    if show:
+        print("\n===== Évaluation du modèle sur le jeu de test ====")
+        # Tableau
+        units = ['A', 'A', 'A'] if coord_system == 'cartesian' else ['A', 'rad', 'rad']
+        header = [f"{name} ({units[i]})" for i, name in enumerate(label_names)]
+        metrics = [
+            ('MAE', 'MAE (unité)'),
+            ('RMSE', 'RMSE (unité)'),
+            ('NMAE_mean', 'NMAE (mean)'),
+            ('NMAE_std', 'NMAE (std)'),
+            ('NMAE_range', 'NMAE (range)'),
+            ('NRMSE_mean', 'NRMSE (mean)'),
+            ('NRMSE_std', 'NRMSE (std)'),
+            ('NRMSE_range', 'NRMSE (range)'),
+            ('R²', 'R²'),
+        ]
+        col_width = max(12, max(len(h) for h in header))
+        metric_width = 16
+        # Header
+        print("| {:<{w}} |".format("Metrics", w=metric_width) + " ".join([f"{h:>{col_width}}" for h in header]) + " |")
+        print("|" + "-"*(metric_width+2) + "|" + "|".join(["-"*col_width]*len(header)) + "-|")
+        for metric, label in metrics:
+            if metric == 'R²':
+                row = [f"{results[name][metric]:.3f}" for name in label_names]
+            elif metric in ['MAE', 'RMSE']:
+                row = [f"{results[name][metric]:.3f} {units[i]}" for i, name in enumerate(label_names)]
+            else:
+                row = [f"{results[name][metric]:.3f} %" for name in label_names]
+            print("| {:<{w}} |".format(label, w=metric_width) + " ".join([f"{val:>{col_width}}" for val in row]) + " |")
+        print()
+    return results
 
 
-if __name__ == "__main__":
-    evaluate()
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Evaluate a trained model on its test set.')
+    parser.add_argument('--model', type=str, required=True,
+                        help='Model name (e.g. ODMR_CNN_Compact, HybridODMRPredictor, MWConfig_CNN, etc.)')
+    parser.add_argument('--model_dir', type=str, default=None,
+                        help='Path to model directory (default: models/{model})')
+    parser.add_argument('--dataset_dir', type=str, default=None,
+                        help='Dataset directory (default: from log)')
+    parser.add_argument('--device', type=str, default='cpu',
+                        help='Device to use (cpu or cuda)')
+    args = parser.parse_args()
+
+    evaluate_model(model_name=args.model, model_dir=args.model_dir, dataset_dir=args.dataset_dir, device=args.device)

@@ -12,6 +12,8 @@ from utils import load_normalization_stats, denormalize_labels
 def analyze_dataset(dataset_dir="dataset_multi_mw"):
     """Analyze the multi-MW dataset for predictability of each component."""
     
+    dataset_dir = os.path.join("datasets_pytorch", dataset_dir)
+    
     # Detect coordinate system from normalization stats
     norm_stats = load_normalization_stats(dataset_dir)
     coord_system = norm_stats.get('coordinate_system', 'cartesian')
@@ -267,5 +269,5 @@ def analyze_dataset(dataset_dir="dataset_multi_mw"):
 
 if __name__ == "__main__":
     import sys
-    dataset_dir = sys.argv[1] if len(sys.argv) > 1 else "dataset_multi_mw"
+    dataset_dir = sys.argv[1] if len(sys.argv) > 1 else "dataset_multi_mw_2"
     analyze_dataset(dataset_dir)

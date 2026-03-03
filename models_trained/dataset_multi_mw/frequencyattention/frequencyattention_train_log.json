@@ -1,0 +1,28 @@
+{
+  "timestamp": "2026-02-25 12:54:39",
+  "model_name": "FrequencyAttention",
+  "model_structure": "FrequencyAttention(\n  (conv): Sequential(\n    (0): Conv1d(10, 64, kernel_size=(5,), stride=(1,), padding=(2,))\n    (1): ReLU()\n    (2): Conv1d(64, 128, kernel_size=(5,), stride=(1,), padding=(2,))\n    (3): ReLU()\n  )\n  (attention): Sequential(\n    (0): Linear(in_features=128, out_features=128, bias=True)\n    (1): Tanh()\n    (2): Linear(in_features=128, out_features=1, bias=True)\n  )\n  (fc): Sequential(\n    (0): Linear(in_features=128, out_features=64, bias=True)\n    (1): ReLU()\n    (2): Linear(in_features=64, out_features=3, bias=True)\n  )\n)",
+  "config": {
+    "batch_size": 32,
+    "epochs": 200,
+    "lr": 0.0002,
+    "weight_decay": 0.0005,
+    "dataset_dir": "dataset_multi_mw",
+    "patience": 20,
+    "min_delta": 1e-06,
+    "loss_weights": null,
+    "use_attention": false,
+    "physic_informed": false,
+    "physics_loss_weight": null
+  },
+  "val_loss": 0.661,
+  "train_loss": 0.665,
+  "metrics": {
+    "mae": [
+      0.0205,
+      0.3513,
+      0.3626
+    ],
+    "physics_loss": null
+  }
+}

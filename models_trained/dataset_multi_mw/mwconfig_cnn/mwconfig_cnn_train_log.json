@@ -1,0 +1,28 @@
+{
+  "timestamp": "2026-02-25 12:48:10",
+  "model_name": "MWConfig_CNN",
+  "model_structure": "MWConfig_CNN(\n  (conv_mw): Conv1d(1, 16, kernel_size=(5,), stride=(1,), padding=(2,))\n  (pool): AdaptiveAvgPool1d(output_size=1)\n  (fc): Sequential(\n    (0): Linear(in_features=160, out_features=128, bias=True)\n    (1): ReLU()\n    (2): Linear(in_features=128, out_features=3, bias=True)\n  )\n)",
+  "config": {
+    "batch_size": 32,
+    "epochs": 200,
+    "lr": 0.0002,
+    "weight_decay": 0.0005,
+    "dataset_dir": "dataset_multi_mw",
+    "patience": 20,
+    "min_delta": 1e-06,
+    "loss_weights": null,
+    "use_attention": false,
+    "physic_informed": false,
+    "physics_loss_weight": null
+  },
+  "val_loss": 0.661,
+  "train_loss": 0.666,
+  "metrics": {
+    "mae": [
+      0.0188,
+      0.3525,
+      0.3609
+    ],
+    "physics_loss": null
+  }
+}

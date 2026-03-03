@@ -1,13 +1,30 @@
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
-from pathlib import Path
-import matplotlib.pyplot as plt
-import argparse
 import numpy as np
-from split_dataset import train_val_test_split
-from utils import load_normalization_stats, denormalize_labels
-import models  # Import the models module
+import os
+import argparse
+import json
+from torch.utils.data import DataLoader
+from datetime import datetime
+from pathlib import Path
+from dataset import train_val_test_split, print_dataset_statistics, get_data_loaders, get_frequency_axis
+from utils import load_normalization_stats, denormalize_labels, plot_training_history
+from physics_informed import extract_odmr_peak_frequencies, physics_loss
+import models
+
+
+# WeightedMSELoss for HybridODMRPredictor
+class WeightedMSELoss(nn.Module):
+    def __init__(self, weights):
+        super().__init__()
+        self.weights = torch.tensor(weights, dtype=torch.float32)
+    def forward(self, pred, target):
+        # Broadcast weights if needed
+        if pred.shape[-1] != self.weights.shape[0]:
+            raise ValueError(f"Weights shape {self.weights.shape} does not match prediction shape {pred.shape}")
+        loss = ((pred - target) ** 2) * self.weights
+        return loss.mean()
+
 
 class EarlyStopping:
     '''
@@ -28,156 +45,130 @@ class EarlyStopping:
             self.best_state = model.state_dict()       # save best model state
         else:
             self.counter += 1                          # if no improvement, increment counter
-
         return self.counter >= self.patience           # return True if early stopping criterion met  
 
 
-def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="dataset_multi_mw", 
-          patience=20, min_delta=1e-6, model_name="ODMR_CNN_Compact"):
+def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="dataset_multi_mw", patience=20, min_delta=1e-6, model_name="FrequencyAttention", loss_weights=None, use_attention=False, physics_loss_weight=0.1, show_dataset_stats=False):
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    DATASET_DIR = dataset_dir
-    BATCH_SIZE = batch_size
-    EPOCHS = epochs
-    LR = lr
-    WEIGHT_DECAY = weight_decay
-    MODEL_NAME = model_name
+    DATASET_DIR = os.path.join("datasets_pytorch", dataset_dir)
 
-    # Check if model requires multi-config input
-    available_models = {
-        'ODMR_CNN': models.ODMR_CNN,
-        'ODMR_CNN_Compact': models.ODMR_CNN_Compact,
-        'ODMR_CNN_Deep': models.ODMR_CNN_Deep,
-        'FrequencyAttention': models.FrequencyAttention,
-        'MWConfig_CNN': models.MWConfig_CNN,
-    }
+    # Check if model is available
+    if model_name not in models.available_models():
+        raise ValueError(f"Unknown model: {model_name}. Available models: {list(models.available_models().keys())}")
     
-    if MODEL_NAME not in available_models:
-        raise ValueError(f"Unknown model: {MODEL_NAME}. Available models: {list(available_models.keys())}")
-    
-    model_class = available_models[MODEL_NAME]
-    use_multi_config = model_class.requires_multi_config
-    
-    print(f"Model: {MODEL_NAME}")
-    print(f"Input format: {'Multi-config (10, 201)' if use_multi_config else 'Single-config (1, 201)'}")
-    print()
+    model_class = models.available_models()[model_name]
+    if model_name == 'HybridODMRPredictor':
+        model = model_class(n_freq=201, use_attention=use_attention).to(DEVICE)
+    else:
+        model = model_class(n_freq=201).to(DEVICE)
 
-    train_set, val_set, test_set = train_val_test_split(DATASET_DIR, multi_config=use_multi_config)
+    # Load dataset and create data loaders
+    train_set, val_set, test_set = train_val_test_split(DATASET_DIR)
+    train_loader, val_loader, test_loader = get_data_loaders(train_set, val_set, test_set, batch_size=batch_size, device=DEVICE)
 
-    train_loader = DataLoader(
-        train_set,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True if DEVICE == "cuda" else False,
-    )
-
-    val_loader = DataLoader(
-        val_set,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=4,
-    )
-
-    full_dataset = train_set.dataset              # full dataset for input/output dimensions
-    output_dim = 3                                # (Ax, Ay, Az)
-    
-    print(f"Dataset sizes:")
-    print(f"  Train: {len(train_set)} samples")
-    print(f"  Val:   {len(val_set)} samples")
-    print(f"  Test:  {len(test_set)} samples")
-    print(f"  Total: {len(train_set) + len(val_set) + len(test_set)} samples")
-    
-    # Show expected input shape
-    sample_x, _ = full_dataset[0]
-    print(f"  Input shape per sample: {tuple(sample_x.shape)}\\n")
-    
     # Load normalization stats for denormalization during evaluation
     norm_stats = load_normalization_stats(DATASET_DIR)
     labels_mean = norm_stats['labels_mean']
     labels_std = norm_stats['labels_std']
     coord_system = norm_stats.get('coordinate_system', 'cartesian')
+    label_names = ['Ax', 'Ay', 'Az'] if coord_system == 'cartesian' else ['Ar', 'theta', 'phi']
     
-    # Set label names based on coordinate system
-    if coord_system == 'spherical':
-        label_names = ['Ar', 'theta', 'phi']
-        print(f"Coordinate system: SPHERICAL (Ar, theta, phi)")
-    else:
-        label_names = ['Ax', 'Ay', 'Az']
-        print(f"Coordinate system: CARTESIAN (Ax, Ay, Az)")
-    
-    print(f"Label normalization stats loaded:")
-    print(f"  Mean: {labels_mean}")
-    print(f"  Std:  {labels_std}\n")
-
-    # Verify datas metrics (min, max, mean) of labels and signals
-    print("NORMALIZED labels statistics (from dataset):")
-    all_labels = torch.stack([full_dataset[i][1] for i in range(len(full_dataset))], dim=0)
-    print(f"Min: {all_labels.min(dim=0).values}")
-    print(f"Max: {all_labels.max(dim=0).values}")
-    print(f"Mean: {all_labels.mean(dim=0)}")
-    print(f"Std: {all_labels.std(dim=0)}")
-    print("Signals statistics:")
-    all_signals = torch.cat([full_dataset[i][0] for i in range(len(full_dataset))], dim=0)
-    print(f"Min: {all_signals.min()}")
-    print(f"Max: {all_signals.max()}")
-    print(f"Std: {all_signals.std()}\n")
+    if show_dataset_stats:
+        print_dataset_statistics(train_set, val_set, test_set, label_names, labels_mean, labels_std, coord_system)
 
     # Create model based on model_name
-    if MODEL_NAME not in available_models:
-        raise ValueError(f"Unknown model: {MODEL_NAME}. Available models: {list(available_models.keys())}")
-    
-    model = model_class(n_freq=201, output_dim=output_dim).to(DEVICE)
-    
-    print(f"Model: {MODEL_NAME}")
-    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"Parameter to data ratio: 1:{len(train_set) / sum(p.numel() for p in model.parameters()):.2f}")
-    print(f"Training on device: {DEVICE}\n")
-    
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    if model_name == 'HybridODMRPredictor':
+        model = model_class(n_freq=201, use_attention=use_attention).to(DEVICE)
+    else:
+        model = model_class(n_freq=201).to(DEVICE)
+
+    # Loss function
+    if model_name == 'HybridODMRPredictor' and loss_weights is not None:
+        criterion = WeightedMSELoss(loss_weights)
+    else:
+        criterion = nn.MSELoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    # Physics-informed loss (optional)
+    physics_loss_weight = getattr(args, 'physics_loss_weight', 0.1)  # adjustable parameter
+    use_physics_loss = getattr(args, 'physic_informed', False)
+    freq_axis_Hz = get_frequency_axis(DATASET_DIR)  # Get frequency axis (in Hz) for physics-informed loss
 
     # Cosine annealing with warm restarts - good for larger datasets
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    #     optimizer,
+    #     T_0=30,        # Initial restart period (longer for more data)
+    #     T_mult=2,      # Period multiplier
+    #     eta_min=1e-6   # Minimum LR
+    # )
+
+    # ReduceLROnPlateau scheduler - reduces LR when a metric has stopped improving
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
-        T_0=30,        # Initial restart period (longer for more data)
-        T_mult=2,      # Period multiplier
-        eta_min=1e-6   # Minimum LR
+        mode='min',
+        factor=0.5,      # Reduce LR by a factor of 0.5
+        patience=5,      # Number of epochs with no improvement after which LR will be reduced
+        threshold=1e-4,  # Threshold for measuring the new optimum
+        min_lr=1e-6      # Minimum LR
     )
 
     early_stopping = EarlyStopping(patience=patience, min_delta=min_delta)
 
     # Metrics history for plotting
+    mae_keys = [f"mae_{name.lower()}" for name in label_names]  # Dynamically set MAE keys based on label_names
     history = {
         'train_loss': [],
         'val_loss': [],
-        f'nmae_{label_names[0].lower()}': [], f'nmae_{label_names[1].lower()}': [], f'nmae_{label_names[2].lower()}': [],
-        f'nrmse_{label_names[0].lower()}': [], f'nrmse_{label_names[1].lower()}': [], f'nrmse_{label_names[2].lower()}': [],
+        **{k: [] for k in mae_keys},
+        'physics_loss': [],
     }
 
-    for epoch in range(EPOCHS):
+    # ========== TRAINING LOOP ========== #
+    for epoch in range(epochs):
         # ===== Training Phase ===== #
         model.train()
         train_loss = 0.0
-
-        for x, y in train_loader:
-            x = x.to(DEVICE)
-            y = y.to(DEVICE)
-
-            optimizer.zero_grad()       # clear gradients
-            pred = model(x)             # forward pass
-            loss = criterion(pred, y)   # compute loss
-            loss.backward()             # backward pass
-            optimizer.step()            # update weights
-
-            train_loss += loss.item()   # accumulate loss
-
-        train_loss /= len(train_loader) # average training loss
+        physics_loss_accum = 0.0
+        for batch in train_loader:
+            signals, labels = batch
+            signals = signals.to(DEVICE)
+            labels = labels.to(DEVICE)
+            optimizer.zero_grad()
+            preds = model(signals)
+            loss = criterion(preds, labels)
+            if use_physics_loss:
+                # Extract measured peak frequencies from each spectrum in the batch (in Hz, 8 peaks)
+                signals_np = signals.detach().cpu().numpy()
+                measured_freqs = []
+                for s in signals_np:
+                    # If multi-channel, use mean or first channel for each spectrum
+                    if s.ndim == 2:
+                        spectrum = s[0]
+                    else:
+                        spectrum = s
+                    peak_freqs = extract_odmr_peak_frequencies(spectrum, freq_axis_Hz, num_peaks=8)
+                    measured_freqs.append(peak_freqs)
+                measured_freqs = torch.tensor(np.array(measured_freqs), dtype=torch.float32, device=DEVICE)  # (batch, 8) in Hz
+                preds_denorm = denormalize_labels(preds, labels_mean, labels_std).to(DEVICE)
+                # Compute physics-informed loss using new geometry
+                loss_phys = physics_loss(preds_denorm, measured_freqs)
+                total_loss = loss + physics_loss_weight * loss_phys
+                physics_loss_accum += loss_phys.item() * signals.size(0)
+            else:
+                total_loss = loss
+            total_loss.backward()
+            optimizer.step()
+            train_loss += loss.item() * signals.size(0)
+        train_loss /= len(train_loader.dataset)
+        if use_physics_loss:
+            physics_loss_val = physics_loss_accum / len(train_loader.dataset)
+        else:
+            physics_loss_val = 0.0
 
         # ===== Validation Phase ===== #
         model.eval()
         val_loss = 0.0   # validation loss on normalized labels
         abs_error_denorm = torch.zeros(3)  # MAE in original scale
-        sq_error_denorm = 0.0   # MSE in original scale
         n_samples = 0
         
         with torch.no_grad(): # disable gradient computation for validation
@@ -192,34 +183,22 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
                 # Denormalize for evaluation metrics in original scale
                 pred_denorm = denormalize_labels(pred.cpu(), labels_mean, labels_std)
                 y_denorm = denormalize_labels(y.cpu(), labels_mean, labels_std)
-                
                 abs_error_denorm += torch.sum(torch.abs(pred_denorm - y_denorm), dim=0)
-                sq_error_denorm += torch.sum((pred_denorm - y_denorm) ** 2, dim=0)
                 n_samples += x.size(0)
 
-        val_loss /= len(val_loader)  # average validation loss (normalized)
-        mae_denorm = abs_error_denorm / n_samples  # MAE per axis (original scale)
-        rmse_denorm = torch.sqrt(sq_error_denorm / n_samples)  # RMSE per axis (original scale)
-        
-        # Normalized metrics (NMAE, NRMSE) using original scale std
-        label_range_tensor = torch.tensor(labels_std * 6, dtype=torch.float32)  # ~3 sigma range
-        
-        nrmse = rmse_denorm / label_range_tensor  # Normalized RMSE by range
-        nmae = mae_denorm / label_range_tensor  # Normalized MAE by range
-
-        # Store metrics for plotting
+        val_loss /= len(val_loader)
+        mae_denorm = abs_error_denorm / n_samples
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
-        history[f'nmae_{label_names[0].lower()}'].append(nmae[0].item() * 100)
-        history[f'nmae_{label_names[1].lower()}'].append(nmae[1].item() * 100)
-        history[f'nmae_{label_names[2].lower()}'].append(nmae[2].item() * 100)
-        history[f'nrmse_{label_names[0].lower()}'].append(nrmse[0].item() * 100)
-        history[f'nrmse_{label_names[1].lower()}'].append(nrmse[1].item() * 100)
-        history[f'nrmse_{label_names[2].lower()}'].append(nrmse[2].item() * 100)
+        for i, k in enumerate(mae_keys):
+            history[k].append(mae_denorm[i].item())
+        history['physics_loss'].append(physics_loss_val)
 
         # Scheduler step (Cosine annealing updates every epoch)
-        scheduler.step()
-        current_lr = optimizer.param_groups[0]['lr']
+        # scheduler.step()
+
+        # Scheduler step (ReduceLROnPlateau updates on validation loss)
+        scheduler.step(val_loss)
 
         # Format units for display
         if coord_system == 'spherical':
@@ -227,14 +206,36 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
         else:
             units = ['A', 'A', 'A']
 
-        print(
-            f"Epoch {epoch+1:03d} :\n"
-            f" -> Train_loss: {train_loss:.3e} | Val_loss: {val_loss:.3e} \n"
-            f" -> LR: {optimizer.param_groups[0]['lr']:.2e} \n"
-            f" -> MAE (abs): {label_names[0]} {mae_denorm[0]:.4f}{units[0]} - {label_names[1]} {mae_denorm[1]:.4f}{units[1]} - {label_names[2]} {mae_denorm[2]:.4f}{units[2]} \n"
-            f" -> NMAE:      {label_names[0]} {nmae[0]*100:.2f}%  - {label_names[1]} {nmae[1]*100:.2f}%  - {label_names[2]} {nmae[2]*100:.2f}% \n"
-            f" -> NRMSE:     {label_names[0]} {nrmse[0]*100:.2f}% - {label_names[1]} {nrmse[1]*100:.2f}% - {label_names[2]} {nrmse[2]*100:.2f}%"
-        )
+        if epoch == 0 or (epoch + 1) % 5 == 0 or (epoch + 1) == epochs:
+            mae_str = " | ".join([
+                f"{label_names[i]} {mae_denorm[i]:.4f} {units[i]}" for i in range(3)
+            ])
+            print(
+                f"Epoch {epoch+1:03d} :\n"
+                f" -> Train_loss: {train_loss:.3e} | Val_loss: {val_loss:.3e} | Physics_loss: {physics_loss_val:.3e}\n"
+                f" -> LR :        {optimizer.param_groups[0]['lr']:.2e} \n"
+                f" -> MAE :       {mae_str}"
+            )
+            # Print cartesian MAE if using spherical coordinates
+            if coord_system == 'spherical':
+                from utils import spherical_to_cartesian
+                all_cart_pred = []
+                all_cart_label = []
+                with torch.no_grad():
+                    for x, y in val_loader:
+                        x = x.to(DEVICE)
+                        y = y.to(DEVICE)
+                        pred = model(x)
+                        pred_denorm = denormalize_labels(pred.cpu(), labels_mean, labels_std)
+                        y_denorm = denormalize_labels(y.cpu(), labels_mean, labels_std)
+                        cart_pred = spherical_to_cartesian(pred_denorm.numpy())
+                        cart_label = spherical_to_cartesian(y_denorm.numpy())
+                        all_cart_pred.append(cart_pred)
+                        all_cart_label.append(cart_label)
+                all_cart_pred = np.concatenate(all_cart_pred, axis=0)
+                all_cart_label = np.concatenate(all_cart_label, axis=0)
+                cart_mae = np.mean(np.abs(all_cart_pred - all_cart_label), axis=0)
+                print(f" -> MAE cartesian:  Ax {cart_mae[0]:.4f} A | Ay {cart_mae[1]:.4f} A | Az {cart_mae[2]:.4f} A")
 
         # Early stopping check
         if early_stopping.step(val_loss, model):
@@ -243,117 +244,155 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
 
     # Restore best model (whether early stopping was triggered or not)
     model.load_state_dict(early_stopping.best_state)
-    
-    # Save the best model
-    save_dir = Path("saved_models")
-    save_dir.mkdir(exist_ok=True)
-    model_path = save_dir / f"cnn_odmr_loss_{early_stopping.best_loss:.3e}.pt"
-    torch.save(model.state_dict(), model_path)
-    print(f"Best model saved as {model_path} (val_loss: {early_stopping.best_loss:.3e})")
 
-    # Plot training history
-    plot_training_history(history, early_stopping.best_loss, label_names)
+    # === Smart saving system ===
 
+    # 1. Dossier du modèle
+    dataset_subdir = Path("models_trained") / Path(dataset_dir)
+    model_dir = dataset_subdir / model_name.lower()
+    model_dir.mkdir(parents=True, exist_ok=True)
+    model_path = model_dir / f"{model_name.lower()}_best_model.pth"
+    log_path = model_dir / f"{model_name.lower()}_train_log.json"
+    plot_path = model_dir / f"{model_name.lower()}_training_plot.png"
 
-def plot_training_history(history, best_loss, label_names=['Ax', 'Ay', 'Az']):
-    """Plot training and validation metrics over epochs."""
-    epochs = range(1, len(history['train_loss']) + 1)
-    
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle('Training Metrics Evolution', fontsize=16, fontweight='bold')
-    
-    # 1. Loss curves
-    ax = axes[0, 0]
-    ax.plot(epochs, history['train_loss'], label='Train Loss', linewidth=2)
-    ax.plot(epochs, history['val_loss'], label='Val Loss', linewidth=2)
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('Loss (MSE)')
-    ax.set_title('Training and Validation Loss')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    ax.set_yscale('log')
-    
-    # 2. NMAE per axis
-    ax = axes[0, 1]
-    ax.plot(epochs, history[f'nmae_{label_names[0].lower()}'], label=label_names[0], linewidth=2)
-    ax.plot(epochs, history[f'nmae_{label_names[1].lower()}'], label=label_names[1], linewidth=2)
-    ax.plot(epochs, history[f'nmae_{label_names[2].lower()}'], label=label_names[2], linewidth=2)
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('NMAE (%)')
-    ax.set_title('Normalized Mean Absolute Error by Axis')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    # 3. NRMSE per axis
-    ax = axes[1, 0]
-    ax.plot(epochs, history[f'nrmse_{label_names[0].lower()}'], label=label_names[0], linewidth=2)
-    ax.plot(epochs, history[f'nrmse_{label_names[1].lower()}'], label=label_names[1], linewidth=2)
-    ax.plot(epochs, history[f'nrmse_{label_names[2].lower()}'], label=label_names[2], linewidth=2)
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('NRMSE (%)')
-    ax.set_title('Normalized Root Mean Square Error by Axis')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    # 4. Average NMAE and NRMSE
-    ax = axes[1, 1]
-    avg_nmae = [(history[f'nmae_{label_names[0].lower()}'][i] + history[f'nmae_{label_names[1].lower()}'][i] + history[f'nmae_{label_names[2].lower()}'][i]) / 3 
-                for i in range(len(epochs))]
-    avg_nrmse = [(history[f'nrmse_{label_names[0].lower()}'][i] + history[f'nrmse_{label_names[1].lower()}'][i] + history[f'nrmse_{label_names[2].lower()}'][i]) / 3 
-                 for i in range(len(epochs))]
-    ax.plot(epochs, avg_nmae, label='Avg NMAE', linewidth=2)
-    ax.plot(epochs, avg_nrmse, label='Avg NRMSE', linewidth=2)
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('Error (%)')
-    ax.set_title('Average Normalized Errors')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    
-    # Save figure
-    save_dir = Path("saved_models")
-    save_dir.mkdir(exist_ok=True)
-    fig_path = save_dir / f"training_history_loss_{best_loss:.3e}.png"
-    plt.savefig(fig_path, dpi=150, bbox_inches='tight')
-    print(f"Training history plot saved as {fig_path}")
-    plt.show()
+    # 2. Calcul du meilleur score déjà enregistré (MAE)
+    best_mae = None
+    if log_path.exists():
+        try:
+            with open(log_path, 'r') as f:
+                prev_log = json.load(f)
+                prev_mae = prev_log.get('metrics', {}).get('mae', None)
+                if prev_mae is not None:
+                    best_mae = sum(prev_mae) / len(prev_mae)
+        except Exception:
+            best_mae = None
+
+    # 3. Calcul du MAE moyen courant
+    current_mae = [float(history[mae_keys[i]][-1]) for i in range(3)]
+    current_mae_mean = sum(current_mae) / len(current_mae)
+
+    # 4. Si pas de modèle ou meilleur MAE, on sauvegarde
+    print(f"current_mae_mean = {current_mae_mean:.5f}, best_mae = {best_mae if best_mae is not None else 'None'}")
+    should_save = (
+        best_mae is None or current_mae_mean < best_mae
+    )
+    if not should_save:
+        print(f"Model not saved: previous best MAE={best_mae:.5f} is better or equal to current MAE={current_mae_mean:.5f}.")
+    else:
+        torch.save(model.state_dict(), model_path)
+        print(f"Best model saved as {model_path} (MAE: {current_mae_mean:.4f})")
+        # 4. Plot training history et sauvegarde
+        fig = plot_training_history(history, early_stopping.best_loss, label_names, show=False)
+        fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+        print(f"Training history plot saved as {plot_path}")
+
+        # 5. Sauvegarde des scalers si pertinents
+        norm_stats_path = model_dir / f"{model_name.lower()}_scaler.json"
+        norm_stats = {
+            'labels_mean': labels_mean.tolist() if hasattr(labels_mean, 'tolist') else list(labels_mean),
+            'labels_std': labels_std.tolist() if hasattr(labels_std, 'tolist') else list(labels_std)
+        }
+        with open(norm_stats_path, 'w') as f:
+            json.dump(norm_stats, f, indent=2)
+
+        # 6. Log complet (structure, config, timestamp, résultats)
+        log_data = {
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'model_name': model_name,
+            'model_structure': str(model),
+            'config': {
+                'batch_size': batch_size,
+                'epochs': epochs,
+                'lr': lr,
+                'weight_decay': weight_decay,
+                'dataset_dir': dataset_dir,
+                'patience': patience,
+                'min_delta': min_delta,
+                'loss_weights': loss_weights,
+                'use_attention': use_attention,
+                'physic_informed': use_physics_loss is not None,
+                'physics_loss_weight': physics_loss_weight if use_physics_loss is not None else None
+            },
+            'val_loss': round(float(early_stopping.best_loss), 3),
+            'train_loss': round(float(history['train_loss'][-1]), 3),
+            'metrics': {
+                'mae': [round(float(history[mae_keys[i]][-1]), 4) for i in range(3)],
+                'physics_loss': round(float(history['physics_loss'][-1]), 4) if use_physics_loss is not None else None
+            }
+        }
+        with open(log_path, 'w') as f:
+            json.dump(log_data, f, indent=2)
+
+        print(f"Training log saved as {log_path}")
+
+    # === Print cartesian MAE at the end of the training === #
+    if coord_system == 'spherical':
+        from utils import spherical_to_cartesian
+        # Compute true cartesian MAE from all val predictions and labels
+        all_cart_pred = []
+        all_cart_label = []
+        with torch.no_grad():
+            for x, y in val_loader:
+                x = x.to(DEVICE)
+                y = y.to(DEVICE)
+                pred = model(x)
+                pred_denorm = denormalize_labels(pred.cpu(), labels_mean, labels_std)
+                y_denorm = denormalize_labels(y.cpu(), labels_mean, labels_std)
+                cart_pred = spherical_to_cartesian(pred_denorm.numpy())
+                cart_label = spherical_to_cartesian(y_denorm.numpy())
+                all_cart_pred.append(cart_pred)
+                all_cart_label.append(cart_label)
+        all_cart_pred = np.concatenate(all_cart_pred, axis=0)
+        all_cart_label = np.concatenate(all_cart_label, axis=0)
+        cart_mae = np.mean(np.abs(all_cart_pred - all_cart_label), axis=0)
+        print("\nTrue cartesian MAE computed from spherical predictions:")
+        print(f"  Ax = {cart_mae[0]:.4f}  |  Ay = {cart_mae[1]:.4f}  |  Az = {cart_mae[2]:.4f}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train ODMR CNN model for magnetic field detection')
-    
+
     # Model selection
-    parser.add_argument('--model', type=str, default='ODMR_CNN_Compact',
-                        choices=['ODMR_CNN', 'ODMR_CNN_Compact', 'ODMR_CNN_Deep', 'FrequencyAttention', 'MWConfig_CNN'],
-                        help='Model architecture to use (default: ODMR_CNN_Compact)')
-    
+    parser.add_argument('--model', type=str, default='FrequencyAttention', choices=['ODMR_CNN', 'ODMR_CNN_Compact', 'ODMR_CNN_Deep', 'FrequencyAttention', 'MWConfig_CNN', 'HybridODMRPredictor'], help='Model architecture to use (default: FrequencyAttention)')
+
     # Training hyperparameters
-    parser.add_argument('--batch_size', type=int, default=32, 
-                        help='Batch size for training (default: 32)')
-    parser.add_argument('--epochs', type=int, default=200, 
-                        help='Maximum number of training epochs (default: 200)')
-    parser.add_argument('--lr', type=float, default=2e-4, 
-                        help='Learning rate (default: 2e-4)')
-    parser.add_argument('--weight_decay', type=float, default=5e-4, 
-                        help='Weight decay for optimizer (default: 5e-4)')
-    
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training (default: 32)')
+    parser.add_argument('--epochs', type=int, default=200, help='Maximum number of training epochs (default: 200)')
+    parser.add_argument('--lr', type=float, default=2e-4, help='Learning rate (default: 2e-4)')
+    parser.add_argument('--weight_decay', type=float, default=5e-4, help='Weight decay for optimizer (default: 5e-4)')
+
     # Early stopping parameters
-    parser.add_argument('--patience', type=int, default=20, 
-                        help='Early stopping patience (default: 20)')
-    parser.add_argument('--min_delta', type=float, default=1e-6, 
-                        help='Minimum delta for early stopping (default: 1e-6)')
-    
+    parser.add_argument('--patience', type=int, default=15, help='Early stopping patience (default: 15)')
+    parser.add_argument('--min_delta', type=float, default=1e-6, help='Minimum delta for early stopping (default: 1e-6)')
+
     # Dataset parameters
-    parser.add_argument('--dataset_dir', type=str, default='dataset_multi_mw', 
-                        help='Path to dataset directory (default: dataset_multi_mw)')
+    parser.add_argument('--dataset_dir', type=str, default='dataset_multi_mw_2', help='Path to dataset directory (default: dataset_multi_mw_2 in datasets_pytorch/)')
+
+    # Hybrid-specific arguments
+    parser.add_argument('--loss_weights', type=float, nargs=3, default=None, help='Loss weights for [Ax, Ay, Az] (only for HybridODMRPredictor)')
+    parser.add_argument('--use_attention', action='store_true', help='Use attention branch in HybridODMRPredictor (default: CNN)')
     
+    # Physics-informed loss parameters
+    parser.add_argument('--physic_informed', action='store_true', help='Enable physics-guided loss (PINN)')
+    parser.add_argument('--physics_loss_weight', type=float, default=0.1, help='Weight for physics-guided loss (PINN)')
+
+    parser.add_argument('--show_dataset_stats', action='store_true', help='Show dataset statistics (optional)')
+
     args = parser.parse_args()
-    
+
+    if args.model == 'HybridODMRPredictor':
+        nb_param = sum(p.numel() for p in models.available_models()[args.model](n_freq=201, use_attention=args.use_attention).parameters())
+    else:
+        nb_param = sum(p.numel() for p in models.available_models()[args.model](n_freq=201).parameters())
+    dataset_dir_arg = os.path.join("datasets_pytorch", args.dataset_dir)
+    train_set, _, _ = train_val_test_split(dataset_dir_arg)
+    nb_param_per_sample = nb_param / len(train_set) if len(train_set) > 0 else float('nan')
+
     print("=" * 60)
     print("Training Configuration:")
     print("=" * 60)
-    print(f"Model:          {args.model}")
+    print(f"Model:          {args.model} ({nb_param:,} params -> {nb_param_per_sample:.2f} params/train sample)")
+    print(f"Training on :   {'cuda' if torch.cuda.is_available() else 'cpu'}")
     print(f"Batch size:     {args.batch_size}")
     print(f"Epochs:         {args.epochs}")
     print(f"Learning rate:  {args.lr}")
@@ -361,16 +400,12 @@ if __name__ == "__main__":
     print(f"Patience:       {args.patience}")
     print(f"Min delta:      {args.min_delta}")
     print(f"Dataset dir:    {args.dataset_dir}")
+    if args.model == 'HybridODMRPredictor':
+        print(f"Loss weights:   {args.loss_weights}")
+        print(f"Use attention:  {args.use_attention}")
     print("=" * 60)
-    print()
-    
-    train(
-        batch_size=args.batch_size,
-        epochs=args.epochs,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        dataset_dir=args.dataset_dir,
-        patience=args.patience,
-        min_delta=args.min_delta,
-        model_name=args.model
-    )
+
+    try:
+        train(batch_size=args.batch_size, epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay, dataset_dir=args.dataset_dir, patience=args.patience, min_delta=args.min_delta, model_name=args.model, loss_weights=args.loss_weights, use_attention=args.use_attention, physics_loss_weight=args.physics_loss_weight, show_dataset_stats=args.show_dataset_stats)
+    except Exception as e:
+        print(f"Error: {e}")

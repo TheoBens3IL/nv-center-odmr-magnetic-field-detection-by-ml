@@ -8,9 +8,13 @@ from pathlib import Path
 from split_dataset import train_val_test_split
 from utils import load_normalization_stats, denormalize_labels
 import models
+import os
 
 def diagnose_model(model_path, model_name, dataset_dir="dataset_multi_mw"):
     """Analyze predictions from a trained model."""
+    
+    dataset_dir = DATASET_DIR = os.path.join("datasets_pytorch", dataset_dir)
+
     
     # Load model
     available_models = {
