@@ -314,7 +314,7 @@ class ZoneClassifier(nn.Module):
     Classifier that predicts a discrete direction zone index from multi-config ODMR signals.
     Expects input shape (batch, 10, 201) and outputs logits over n_zones classes.
     """
-    def __init__(self, n_channels=10, n_freq=201, n_zones=48):
+    def __init__(self, n_channels=10, n_freq=201, n_zones=48, dropout_rate=0.3):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv1d(n_channels, 64, kernel_size=5, padding=2),
@@ -336,7 +336,7 @@ class ZoneClassifier(nn.Module):
         self.classifier = nn.Sequential(
             nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Dropout(dropout_rate),
             nn.Linear(128, n_zones),
         )
 
@@ -355,9 +355,9 @@ class ZoneAwareRegressor(nn.Module):
         - signals: (batch, 10, 201)
         - zones:   (batch,) int64 in [0, n_zones-1]
     Output:
-        - (batch, 3) normalized (Ax, Ay, Az) components.
+        - normalized (Ax, Ay, Az) components: (batch, 3) 
     """
-    def __init__(self, n_channels=10, n_freq=201, n_zones=48, zone_emb_dim=32, output_dim=3):
+    def __init__(self, n_channels=10, n_freq=201, n_zones=48, zone_emb_dim=32, output_dim=3, dropout_rate=0.3):
         super().__init__()
 
         self.feature_extractor = nn.Sequential(
@@ -382,10 +382,10 @@ class ZoneAwareRegressor(nn.Module):
         self.regressor = nn.Sequential(
             nn.Linear(256 + zone_emb_dim, 256),
             nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Dropout(dropout_rate),
             nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(min(dropout_rate, 0.2)),
             nn.Linear(128, output_dim),
         )
 
@@ -400,6 +400,32 @@ class ZoneAwareRegressor(nn.Module):
         return output
 
 
+class ZoneAwareTwoStage(nn.Module):
+    """
+    Two-stage model: classifier + zone-aware regressor.
+    Usage:
+      - forward(x): returns regressed (Ax, Ay, Az) using predicted zone
+      - forward_classifier(x): returns logits (zone prediction)
+      - forward_regressor(x, zones): returns regressed (Ax, Ay, Az) for given zones
+    """
+    def __init__(self, n_channels=10, n_freq=201, n_zones=48, zone_emb_dim=32, output_dim=3, dropout_rate=0.3):
+        super().__init__()
+        self.classifier = ZoneClassifier(n_channels=n_channels, n_freq=n_freq, n_zones=n_zones, dropout_rate=dropout_rate)
+        self.regressor = ZoneAwareRegressor(n_channels=n_channels, n_freq=n_freq, n_zones=n_zones, zone_emb_dim=zone_emb_dim, output_dim=output_dim, dropout_rate=dropout_rate)
+
+    def forward(self, x):
+        # x: (batch, 10, 201)
+        logits = self.classifier(x)
+        zones_pred = logits.argmax(dim=1)
+        return self.regressor(x, zones_pred)
+
+    def forward_classifier(self, x):
+        return self.classifier(x)
+
+    def forward_regressor(self, x, zones):
+        return self.regressor(x, zones)
+    
+
 def available_models():
     return {
         'ODMR_CNN': ODMR_CNN,
@@ -409,7 +435,8 @@ def available_models():
         'MWConfig_CNN': MWConfig_CNN,
         'HybridODMRPredictor': HybridODMRPredictor,
         'ZoneClassifier': ZoneClassifier,
-        'ZoneAwareRegressor': ZoneAwareRegressor
+        'ZoneAwareRegressor': ZoneAwareRegressor,
+        'ZoneAwareTwoStage': ZoneAwareTwoStage,
     }
 
 def count_parameters(model):

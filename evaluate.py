@@ -2,159 +2,201 @@ import os
 import torch
 import numpy as np
 import argparse
-from pathlib import Path
-from utils import load_normalization_stats, denormalize_labels
 import models
+from pathlib import Path
+from torch.utils.data import DataLoader
+from train_zone_models import ZoneSubset
+from utils import load_normalization_stats, denormalize_labels, compute_zones_for_dataset
 from dataset import train_val_test_split
-import json
+from sklearn.metrics import r2_score
 
-'''
-Evaluate a trained model on the test set and report metrics.
-All metrics are computed on denormalized predictions and labels for interpretability (real units).
-'''
 
-def evaluate_model(model_name, model_dir=None, dataset_dir=None, device='cpu', show=True):
-    # Paths
-    if model_dir is None:
-        # Utilise models_trained/{dataset_dir}/{model_name}
-        if dataset_dir is None:
-            raise FileNotFoundError("No dataset_dir provided for model path resolution.")
-        model_dir = Path("models_trained") / Path(dataset_dir) / model_name.lower()
-    else:
-        model_dir = Path(model_dir)
-    model_path = model_dir / f"{model_name.lower()}_best_model.pth"
-    log_path = model_dir / f"{model_name.lower()}_train_log.json"
-    scaler_path = model_dir / f"{model_name.lower()}_scaler.json"
-
-    # Load config from log
-    if log_path.exists():
-        with open(log_path, 'r') as f:
-            log = json.load(f)
-        dataset_dir = log['config']['dataset_dir'] if dataset_dir is None else dataset_dir
-    else:
-        if dataset_dir is None:
-            raise FileNotFoundError("No log file found and no dataset_dir provided.")
-
-    # Correction: n'ajoute 'datasets_pytorch' que si nécessaire
-    if dataset_dir is not None:
-        if not (dataset_dir.startswith('datasets_pytorch') or os.path.isabs(dataset_dir)):
-            dataset_dir = os.path.join("datasets_pytorch", dataset_dir)
-
-    # Load normalization stats
-    norm_stats = load_normalization_stats(dataset_dir)
-    labels_mean = norm_stats['labels_mean']
-    labels_std = norm_stats['labels_std']
-    coord_system = norm_stats.get('coordinate_system', 'cartesian')
-    label_names = ['Ar', 'theta', 'phi'] if coord_system == 'spherical' else ['Ax', 'Ay', 'Az']
-
-    # Load test set
-    train_set, val_set, test_set = train_val_test_split(dataset_dir, multi_config=models.__dict__[model_name].requires_multi_config)
-    test_loader = torch.utils.data.DataLoader(test_set, batch_size=64, shuffle=False, num_workers=0)
-
-    # Load model
+def load_model(model_name, model_dir, dataset_dir, device='cpu'):
     model_class = models.__dict__[model_name]
+
     if model_name == 'HybridODMRPredictor':
-        # Use_attention from log if available
-        use_attention = log['config'].get('use_attention', False) if log_path.exists() else False
-        model = model_class(n_freq=201, use_attention=use_attention)
+        model = model_class(n_channels=10, n_freq=201, use_attention=False)
+    elif model_name == 'ZoneClassifier':
+        n_zones = compute_zones_for_dataset(dataset_dir)[0].max() + 1
+        model = model_class(n_channels=10, n_freq=201, n_zones=n_zones)
+    elif model_name == 'ZoneAwareRegressor' or model_name == 'ZoneAwareTwoStage' or model_name == 'ZoneAwareTwoStage_joint':
+        n_zones = compute_zones_for_dataset(dataset_dir)[0].max() + 1
+        model = model_class(n_channels=10, n_freq=201, n_zones=n_zones, zone_emb_dim=32, output_dim=3)
+    else:  # standard CNN regressor
+        model = model_class(n_channels=10, n_freq=201, output_dim=3)
+
+    if model_name == 'ZoneAwareTwoStage' and 'zoneawaretwostage_joint' in str(model_dir):
+        state_path = Path(model_dir) / "zoneawaretwostage_joint_best_model.pth"
     else:
-        model = model_class(n_freq=201, output_dim=3)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+        state_path = Path(model_dir) / f"{model_name.lower()}_best_model.pth"
+    model.load_state_dict(torch.load(state_path, map_location=device))
     model.to(device)
     model.eval()
+    return model
 
-    # Evaluation
-    all_preds = []
-    all_labels = []
+
+def get_test_loader(dataset_dir, model_type, batch_size=64):
+    if 'zone' in model_type.lower():
+        zones, labels_mean, labels_std = compute_zones_for_dataset(dataset_dir)
+        train_set, val_set, test_set = train_val_test_split(dataset_dir)
+        if 'classifier' in model_type.lower():
+            test_set = ZoneSubset(test_set, zones, regression=False)
+        else:
+            test_set = ZoneSubset(test_set, zones)
+    else:
+        norm_stats = load_normalization_stats(dataset_dir)
+        labels_mean = norm_stats['labels_mean']
+        labels_std = norm_stats['labels_std']
+        train_set, val_set, test_set = train_val_test_split(dataset_dir)
+
+    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=0)
+    return test_loader, labels_mean, labels_std
+
+
+def evaluate_cnn(model, test_loader, device='cpu'):
+    all_preds, all_labels = [], []
     with torch.no_grad():
-        for x, y in test_loader:
-            x = x.to(device)
-            y = y.to(device)
-            pred = model(x)
-            all_preds.append(pred.cpu())
-            all_labels.append(y.cpu())
+        for signals, labels in test_loader:
+            signals, labels = signals.to(device), labels.to(device)
+            preds = model(signals)
+            all_preds.append(preds.cpu())
+            all_labels.append(labels.cpu())
     y_pred = torch.cat(all_preds, dim=0)
     y_true = torch.cat(all_labels, dim=0)
+    return y_pred, y_true
 
-    # Denormalize
+
+def evaluate_regressor(model, test_loader, device='cpu'):
+    all_preds, all_labels = [], []
+    with torch.no_grad():
+        for data in test_loader:
+            signals, labels, zones = data
+            signals, labels, zones = signals.to(device), labels.to(device), zones.to(device)
+            preds = model(signals, zones)
+            all_preds.append(preds.cpu())
+            all_labels.append(labels.cpu())
+    y_pred = torch.cat(all_preds, dim=0)
+    y_true = torch.cat(all_labels, dim=0)
+    return y_pred, y_true
+
+
+def evaluate_classifier(model, test_loader, device='cpu'):
+    correct, total = 0, 0
+    with torch.no_grad():
+        for signals, zones in test_loader:
+            signals, zones = signals.to(device), zones.to(device)
+            logits = model(signals)
+            preds = logits.argmax(dim=1)
+            correct += (preds == zones).sum().item()
+            total += zones.size(0)
+    accuracy = correct / total
+    print(f"[Classifier] Test Accuracy: {accuracy*100:.2f}%")
+    return accuracy
+
+
+def evaluate_two_stage(model, test_loader, device='cpu'):
+    all_preds, all_labels = [], []
+    with torch.no_grad():
+        for signals, labels, zones_true in test_loader:
+            signals, labels, zones_true = signals.to(device), labels.to(device), zones_true.to(device)
+            logits = model.forward_classifier(signals)
+            zones_pred = logits.argmax(dim=1)
+            preds = model.forward_regressor(signals, zones_pred)
+            all_preds.append(preds.cpu())
+            all_labels.append(labels.cpu())
+    y_pred = torch.cat(all_preds, dim=0)
+    y_true = torch.cat(all_labels, dim=0)
+    return y_pred, y_true
+
+
+def compute_metrics(y_pred, y_true, labels_mean, labels_std, coord_system):
     y_pred_denorm = denormalize_labels(y_pred, labels_mean, labels_std).numpy()
     y_true_denorm = denormalize_labels(y_true, labels_mean, labels_std).numpy()
-
-    # Metrics
+    units = ['A']*3 if coord_system == 'cartesian' else ['A', 'rad', 'rad']
+    label_names = ['Ax', 'Ay', 'Az'] if coord_system == 'cartesian' else ['Ar', 'theta', 'phi']
     results = {}
-    units = ['A', 'A', 'A'] if coord_system == 'cartesian' else ['A', 'rad', 'rad']
     for i, name in enumerate(label_names):
         mae = float(np.abs(y_pred_denorm[:, i] - y_true_denorm[:, i]).mean())
         mean_abs = float(np.abs(y_true_denorm[:, i]).mean())
         std = float(np.std(y_true_denorm[:, i]))
-        if show:
-            print(f"Mean Abs = {mean_abs:.3f} {units[i]}, Std = {std:.3f} {units[i]}")
         val_range = float(np.max(y_true_denorm[:, i]) - np.min(y_true_denorm[:, i]))
-        rmse = float(np.sqrt(((y_pred_denorm[:, i] - y_true_denorm[:, i]) ** 2).mean()))
-        # Normalisations
-        nmae_mean = (mae / (mean_abs + 1e-8)) * 100
-        nmae_std = (mae / (std + 1e-8)) * 100
-        nmae_range = (mae / (val_range + 1e-8)) * 100
-        nrmse_mean = (rmse / (mean_abs + 1e-8)) * 100
-        nrmse_std = (rmse / (std + 1e-8)) * 100
-        nrmse_range = (rmse / (val_range + 1e-8)) * 100
-        from sklearn.metrics import r2_score
-        r2 = float(r2_score(y_true_denorm[:, i], y_pred_denorm[:, i]))
+        rmse = float(np.sqrt(((y_pred_denorm[:, i] - y_true_denorm[:, i])**2).mean()))
         results[name] = {
             'MAE': round(mae, 3),
             'RMSE': round(rmse, 3),
-            'NMAE_mean': round(nmae_mean, 3),
-            'NMAE_std': round(nmae_std, 3),
-            'NMAE_range': round(nmae_range, 3),
-            'NRMSE_mean': round(nrmse_mean, 3),
-            'NRMSE_std': round(nrmse_std, 3),
-            'NRMSE_range': round(nrmse_range, 3),
-            'R²': round(r2, 3)
+            'NMAE_mean': round(mae / (mean_abs + 1e-8) * 100, 3),
+            'NMAE_std': round(mae / (std + 1e-8) * 100, 3),
+            'NMAE_range': round(mae / (val_range + 1e-8) * 100, 3),
+            'NRMSE_mean': round(rmse / (mean_abs + 1e-8) * 100, 3),
+            'NRMSE_std': round(rmse / (std + 1e-8) * 100, 3),
+            'NRMSE_range': round(rmse / (val_range + 1e-8) * 100, 3),
+            'R²': round(float(r2_score(y_true_denorm[:, i], y_pred_denorm[:, i])), 3)
         }
+    mae_mean = np.mean([results[name]['MAE'] for name in label_names])
 
-    if show:
-        print("\n===== Évaluation du modèle sur le jeu de test ====")
-        # Tableau
-        units = ['A', 'A', 'A'] if coord_system == 'cartesian' else ['A', 'rad', 'rad']
-        header = [f"{name} ({units[i]})" for i, name in enumerate(label_names)]
-        metrics = [
-            ('MAE', 'MAE (unité)'),
-            ('RMSE', 'RMSE (unité)'),
-            ('NMAE_mean', 'NMAE (mean)'),
-            ('NMAE_std', 'NMAE (std)'),
-            ('NMAE_range', 'NMAE (range)'),
-            ('NRMSE_mean', 'NRMSE (mean)'),
-            ('NRMSE_std', 'NRMSE (std)'),
-            ('NRMSE_range', 'NRMSE (range)'),
-            ('R²', 'R²'),
-        ]
-        col_width = max(12, max(len(h) for h in header))
-        metric_width = 16
-        # Header
-        print("| {:<{w}} |".format("Metrics", w=metric_width) + " ".join([f"{h:>{col_width}}" for h in header]) + " |")
-        print("|" + "-"*(metric_width+2) + "|" + "|".join(["-"*col_width]*len(header)) + "-|")
-        for metric, label in metrics:
-            if metric == 'R²':
-                row = [f"{results[name][metric]:.3f}" for name in label_names]
-            elif metric in ['MAE', 'RMSE']:
-                row = [f"{results[name][metric]:.3f} {units[i]}" for i, name in enumerate(label_names)]
-            else:
-                row = [f"{results[name][metric]:.3f} %" for name in label_names]
-            print("| {:<{w}} |".format(label, w=metric_width) + " ".join([f"{val:>{col_width}}" for val in row]) + " |")
-        print()
+    print("\n===== Evaluation Results (on the test set) =====")
+    print(f"MAE mean: {mae_mean:.3f} {units[0]}\n")
+    header = [f"{name} ({units[i]})" for i, name in enumerate(label_names)]
+    metric_width = 16
+    col_width = max(12, max(len(h) for h in header))
+    metrics = [
+        ('MAE', 'MAE (unit)'), ('RMSE', 'RMSE (unit)'),
+        ('NMAE_mean', 'NMAE (mean)'), ('NMAE_std', 'NMAE (std)'), ('NMAE_range', 'NMAE (range)'),
+        ('NRMSE_mean', 'NRMSE (mean)'), ('NRMSE_std', 'NRMSE (std)'), ('NRMSE_range', 'NRMSE (range)'),
+        ('R²', 'R²')
+    ]
+    print("| {:<{w}} |".format("Metrics", w=metric_width) + " ".join([f"{h:>{col_width}}" for h in header]) + " |")
+    print("|" + "-"*(metric_width+2) + "|" + "|".join(["-"*col_width]*len(header)) + "-|")
+    for metric, label in metrics:
+        row = [f"{results[name][metric]:.3f} {'%' if 'N' in metric else units[i]}" for i, name in enumerate(label_names)]
+        print("| {:<{w}} |".format(label, w=metric_width) + " ".join([f"{val:>{col_width}}" for val in row]) + " |")
+    print()
     return results
 
 
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser(description='Evaluate a trained model on its test set.')
-    parser.add_argument('--model', type=str, required=True,
-                        help='Model name (e.g. ODMR_CNN_Compact, HybridODMRPredictor, MWConfig_CNN, etc.)')
-    parser.add_argument('--model_dir', type=str, default=None,
-                        help='Path to model directory (default: models/{model})')
-    parser.add_argument('--dataset_dir', type=str, default=None,
-                        help='Dataset directory (default: from log)')
-    parser.add_argument('--device', type=str, default='cpu',
-                        help='Device to use (cpu or cuda)')
+    parser.add_argument('--model', type=str, required=True, help='Name of the model to evaluate (e.g., "ODMRPredictor", "ZoneAwareRegressor", "ZoneClassifier", "ZoneAwareRegressor_Two_Stage")')
+    parser.add_argument('--dataset_dir', type=str, default="dataset_multi_mw_2")
     args = parser.parse_args()
 
-    evaluate_model(model_name=args.model, model_dir=args.model_dir, dataset_dir=args.dataset_dir, device=args.device)
+    # Set device
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    # Paths
+    # Special handling for joint-trained two-stage model
+    if args.model.lower() == 'zoneawaretwostage_joint':
+        model_dir = Path("models_trained") / Path(args.dataset_dir) / 'zoneawaretwostage_joint'
+        model_name = 'ZoneAwareTwoStage'
+    else:
+        model_dir = Path("models_trained") / Path(args.dataset_dir) / args.model.lower()
+        model_name = args.model
+
+    # Add 'datasets_pytorch' if necessary
+    if args.dataset_dir is not None:
+        if not (args.dataset_dir.startswith('datasets_pytorch') or os.path.isabs(args.dataset_dir)):
+            args.dataset_dir = os.path.join("datasets_pytorch", args.dataset_dir)
+
+    # Infer coordinate system from dataset_dir
+    if 'spherical' in args.dataset_dir.lower():
+        coord_system = 'spherical'
+    else:
+        coord_system = 'cartesian'
+
+    test_loader, labels_mean, labels_std = get_test_loader(args.dataset_dir, model_name, batch_size=64)
+    model = load_model(model_name, model_dir, args.dataset_dir, device=device)
+    if args.model.lower() == 'zoneclassifier':
+        evaluate_classifier(model, test_loader, device=device)
+        return
+    elif args.model.lower() == 'zoneawareregressor':
+        y_pred, y_true = evaluate_regressor(model, test_loader, device=device)
+    elif args.model.lower() == 'zoneawaretwostage' or args.model.lower() == 'zoneawaretwostage_joint':
+        y_pred, y_true = evaluate_two_stage(model, test_loader, device=device)
+    else:
+        y_pred, y_true = evaluate_cnn(model, test_loader, device=device)
+    
+    compute_metrics(y_pred, y_true, labels_mean, labels_std, coord_system=coord_system)
+
+
+if __name__ == '__main__':
+    main()

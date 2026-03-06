@@ -223,7 +223,7 @@ def plot_training_history(history, label_names=['Ax', 'Ay', 'Az'], show=True):
 
 def compute_direction_zones(vectors):
     """
-    Discretize 3D vectors into 48 cubic-symmetry zones on the sphere.
+    Discretize 3D magnetic field vectors into 48 cubic-symmetry zones on the sphere.
 
     This follows the O_h symmetry of the diamond lattice and the NV axes:
     - The sphere is first divided into 8 octants by the coordinate planes
@@ -231,47 +231,30 @@ def compute_direction_zones(vectors):
     - Within each octant, planes Bx = ±By, By = ±Bz, Bx = ±Bz order the
       absolute values |Bx|, |By|, |Bz|. The 6 possible orderings correspond
       to 6 permutations.
-
-    Total zones = 8 octants × 6 permutations = 48 identical spherical
-    triangles, which is the standard partition for cubic symmetry and
-    matches the 48 fundamental sectors you described.
+    Total zones = 8 octants * 6 permutations = 48 identical spherical triangles,
+    which is the standard partition for cubic symmetry.
 
     Parameters
         vectors : array-like or tensor of shape (..., 3)
             Cartesian components (Ax, Ay, Az) or (Bx, By, Bz) in any units.
-        n_theta_bins, n_phi_bins :
-            Kept for backward compatibility but ignored; the number of zones
-            is fixed to 48 by construction.
-
     Returns
         zones : ndarray or tensor of dtype int64, shape (...)
             Integer zone indices in [0, 47].
     """
-    # If vectors is a tensor, convert to numpy array on CPU
-    is_tensor = isinstance(vectors, torch.Tensor)
-    if is_tensor:
-        v = vectors.detach().cpu().numpy()
-    else:
-        v = np.asarray(vectors, dtype=np.float64)
-
-    if v.shape[-1] != 3:
-        raise ValueError(f"Expected last dimension of size 3 for vectors, got shape {v.shape}")
+    # Convert vectors to numpy array
+    v = np.asarray(vectors, dtype=np.float64)
 
     # Extract Cartesian components
-    x = v[..., 0]
-    y = v[..., 1]
-    z = v[..., 2]
-
-    # Handle near-zero vectors: assign them to a default zone (0)
-    r2 = x * x + y * y + z * z
-    valid = r2 > 1e-14
+    x = v[..., 0]  # Extract the entire first line
+    y = v[..., 1]  # Extract the entire second line
+    z = v[..., 2]  # Extract the entire third line
 
     # Octant index from signs of components (3 bits → 8 octants)
     # sign_bit = 1 if component < 0 else 0
     sx = (x < 0).astype(np.int64)
     sy = (y < 0).astype(np.int64)
     sz = (z < 0).astype(np.int64)
-    octant = (sx << 2) | (sy << 1) | sz  # 0..7
+    octant = (sx << 2) | (sy << 1) | sz  # 0..7 (binary encoding of signs)
 
     # Permutation index from ordering of |Bx|, |By|, |Bz|
     abs_vals = np.stack([np.abs(x), np.abs(y), np.abs(z)], axis=-1)  # (..., 3)
@@ -296,12 +279,6 @@ def compute_direction_zones(vectors):
     perm_id = perm_ids_flat.reshape(order.shape[:-1])  # same shape as octant
 
     zones = octant * 6 + perm_id  # 0..47
-
-    # For invalid (near-zero) vectors, force zone 0
-    zones = np.where(valid, zones, 0)
-
-    if is_tensor:
-        return torch.from_numpy(zones).to(dtype=torch.long, device=vectors.device)
     return zones.astype(np.int64)
 
 
@@ -324,4 +301,39 @@ def compute_zones_for_dataset(dataset_dir):
     labels_denorm = denormalize_labels(labels_norm, labels_mean, labels_std)
 
     zones = compute_direction_zones(labels_denorm)
+
     return zones, labels_mean, labels_std
+
+
+def visualize_dataset_direction_zones(dataset_dir):
+    """
+    Visualize how compute_direction_zones partitions the real current directions in a dataset.
+    Loads Ax, Ay, Az from metadata.csv in dataset_dir, computes zones, and plots them in 3D.
+    """
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    from mpl_toolkits.mplot3d import Axes3D
+    metadata_path = os.path.join(dataset_dir, 'metadata.csv')
+
+    if not os.path.exists(metadata_path):
+        raise FileNotFoundError(f"metadata.csv not found in {dataset_dir}")
+    metadata = pd.read_csv(metadata_path)
+    if not {'Ax', 'Ay', 'Az'}.issubset(metadata.columns):
+        raise ValueError("metadata.csv must contain Ax, Ay, Az columns")
+    
+    directions = metadata[['Ax', 'Ay', 'Az']].values
+    zones = compute_direction_zones(directions)
+    x, y, z = directions[:, 0], directions[:, 1], directions[:, 2]
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    scatter = ax.scatter(x, y, z, c=zones, cmap='tab20', s=20, alpha=0.8)
+    ax.set_title(f'Dataset directions partitioned into zones ({dataset_dir})')
+    ax.set_xlabel('Ax')
+    ax.set_ylabel('Ay')
+    ax.set_zlabel('Az')
+    fig.colorbar(scatter, ax=ax, label='Zone index')
+    plt.show()
+
+
+if __name__ =="__main__":
+    visualize_dataset_direction_zones(dataset_dir="datasets_pytorch/dataset_multi_mw_2")

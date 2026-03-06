@@ -211,9 +211,8 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
                 f"{label_names[i]} {mae_denorm[i]:.4f} {units[i]}" for i in range(3)
             ])
             print(
-                f"Epoch {epoch+1:03d} :\n"
-                f" -> Train_loss: {train_loss:.3e} | Val_loss: {val_loss:.3e} | Physics_loss: {physics_loss_val:.3e}\n"
-                f" -> LR :        {optimizer.param_groups[0]['lr']:.2e} \n"
+                f"Epoch [{epoch+1:03d}/{epochs}] :\n"
+                f" -> Train_loss: {train_loss:.4f} | Val_loss: {val_loss:.4f} | Physics_loss: {physics_loss_val:.4f} | LR: {optimizer.param_groups[0]['lr']:.2e} \n"
                 f" -> MAE :       {mae_str}"
             )
             # Print cartesian MAE if using spherical coordinates
@@ -245,6 +244,31 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
     # Restore best model (whether early stopping was triggered or not)
     model.load_state_dict(early_stopping.best_state)
 
+    # ===== Test eval ===== #
+    model.eval()
+    abs_error_denorm = torch.zeros(3)
+    sq_error_denorm = torch.zeros(3)
+    n_samples = 0
+    all_labels_denorm = []
+    all_preds_denorm = []
+    with torch.no_grad():
+        for x, y in test_loader:
+            x = x.to(DEVICE)
+            y = y.to(DEVICE)
+            pred = model(x)
+            pred_denorm = denormalize_labels(pred.cpu(), labels_mean, labels_std)
+            y_denorm = denormalize_labels(y.cpu(), labels_mean, labels_std)
+            abs_error_denorm += torch.sum(torch.abs(pred_denorm - y_denorm), dim=0)
+            sq_error_denorm += torch.sum((pred_denorm - y_denorm) ** 2, dim=0)
+            n_samples += x.size(0)
+            all_labels_denorm.append(y_denorm.numpy())
+            all_preds_denorm.append(pred_denorm.numpy())
+    mae = (abs_error_denorm / n_samples).numpy()
+    rmse = torch.sqrt(sq_error_denorm / n_samples).numpy()
+    print(f"\nTest set metrics (denormalized units):")
+    print(f"  MAE  Ax/Ay/Az: {mae[0]:.4f} / {mae[1]:.4f} / {mae[2]:.4f} A")
+    print(f"  RMSE Ax/Ay/Az: {rmse[0]:.4f} / {rmse[1]:.4f} / {rmse[2]:.4f} A")
+
     # === Smart saving system ===
 
     # 1. Dossier du modèle
@@ -272,17 +296,20 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
     current_mae_mean = sum(current_mae) / len(current_mae)
 
     # 4. Si pas de modèle ou meilleur MAE, on sauvegarde
-    print(f"current_mae_mean = {current_mae_mean:.5f}, best_mae = {best_mae if best_mae is not None else 'None'}")
+    if best_mae is not None:
+        print(f"current_mae_mean = {current_mae_mean:.4f}, best_mae = {best_mae:.4f}")
+    else:
+        print(f"current_mae_mean = {current_mae_mean:.4f}, best_mae = None")
     should_save = (
         best_mae is None or current_mae_mean < best_mae
     )
     if not should_save:
-        print(f"Model not saved: previous best MAE={best_mae:.5f} is better or equal to current MAE={current_mae_mean:.5f}.")
+        print(f"Model not saved: previous best MAE={best_mae:.4f} is better or equal to current MAE={current_mae_mean:.4f}.")
     else:
         torch.save(model.state_dict(), model_path)
         print(f"Best model saved as {model_path} (MAE: {current_mae_mean:.4f})")
         # 4. Plot training history et sauvegarde
-        fig = plot_training_history(history, early_stopping.best_loss, label_names, show=False)
+        fig = plot_training_history(history, label_names=label_names, show=False)
         fig.savefig(plot_path, dpi=150, bbox_inches='tight')
         print(f"Training history plot saved as {plot_path}")
 
@@ -317,7 +344,8 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
             'train_loss': round(float(history['train_loss'][-1]), 3),
             'metrics': {
                 'mae': [round(float(history[mae_keys[i]][-1]), 4) for i in range(3)],
-                'physics_loss': round(float(history['physics_loss'][-1]), 4) if use_physics_loss is not None else None
+                'physics_loss': round(float(history['physics_loss'][-1]), 4) if use_physics_loss is not None else None,
+                'mae_cartesian': [round(float(x), 4) for x in cart_mae] if coord_system == 'spherical' else None
             }
         }
         with open(log_path, 'w') as f:
