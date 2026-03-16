@@ -24,13 +24,11 @@ class ODMRDatasetMultiConfig(Dataset):
         self.signals_dir = os.path.join(self.dataset_dir, "signals")
         self.metadata = pd.read_csv(os.path.join(self.dataset_dir, "metadata.csv"))
         self.transform = transform
-        # Detect label columns (cartesian or spherical)
+        # Detect label columns
         if 'Ax' in self.metadata.columns:
             self.label_cols = ['Ax', 'Ay', 'Az']
-        elif 'Ar' in self.metadata.columns:
-            self.label_cols = ['Ar', 'theta', 'phi']
         else:
-            raise ValueError("Could not find label columns (Ax/Ay/Az or Ar/theta/phi)")
+            raise ValueError("Could not find label columns (Ax/Ay/Az) in metadata.csv")
 
     def __len__(self):
         return len(self.metadata)
@@ -195,7 +193,7 @@ def get_frequency_axis(dataset_dir):
     return freq_axis_Hz
 
 
-def print_dataset_statistics(train_set, val_set, test_set, label_names, labels_mean, labels_std, coord_system):
+def print_dataset_statistics(train_set, val_set, test_set, label_names, labels_mean, labels_std):
     """
     Print statistics for the dataset: label stats (normalized and denormalized), signal stats, and frequency axis.
     Args:
@@ -203,14 +201,12 @@ def print_dataset_statistics(train_set, val_set, test_set, label_names, labels_m
         label_names: List of label names (e.g., ['Ax', 'Ay', 'Az'])
         labels_mean: Mean used for normalization
         labels_std: Std used for normalization
-        coord_system: 'cartesian' or 'spherical'
         train_set, val_set, test_set: Subsets for printing sizes
     """
     print("DATASET STATISTICS")
     print("=" * 60)
     print(f"Dataset name: {train_set.dataset.dataset_dir.split(os.sep)[-1]}")
     print(f"Dataset sizes:  Total: {len(train_set) + len(val_set) + len(test_set)} | Train: {len(train_set)} | Val: {len(val_set)} | Test: {len(test_set)}")
-    print(f"Coordinate system: {coord_system} ({', '.join(label_names)})")
     print()
 
     # Access the full dataset from the Subset to compute statistics

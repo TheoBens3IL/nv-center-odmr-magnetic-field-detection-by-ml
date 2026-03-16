@@ -4,7 +4,6 @@ import numpy as np
 import os
 import argparse
 import json
-from torch.utils.data import DataLoader
 from datetime import datetime
 from pathlib import Path
 from dataset import train_val_test_split, print_dataset_statistics, get_data_loaders, get_frequency_axis
@@ -70,11 +69,10 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
     norm_stats = load_normalization_stats(DATASET_DIR)
     labels_mean = norm_stats['labels_mean']
     labels_std = norm_stats['labels_std']
-    coord_system = norm_stats.get('coordinate_system', 'cartesian')
-    label_names = ['Ax', 'Ay', 'Az'] if coord_system == 'cartesian' else ['Ar', 'theta', 'phi']
+    label_names = ['Ax', 'Ay', 'Az']
     
     if show_dataset_stats:
-        print_dataset_statistics(train_set, val_set, test_set, label_names, labels_mean, labels_std, coord_system)
+        print_dataset_statistics(train_set, val_set, test_set, label_names, labels_mean, labels_std)
 
     # Create model based on model_name
     if model_name == 'HybridODMRPredictor':
@@ -201,10 +199,7 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
         scheduler.step(val_loss)
 
         # Format units for display
-        if coord_system == 'spherical':
-            units = ['A', 'rad', 'rad']
-        else:
-            units = ['A', 'A', 'A']
+        units = ['A', 'A', 'A']
 
         if epoch == 0 or (epoch + 1) % 5 == 0 or (epoch + 1) == epochs:
             mae_str = " | ".join([
@@ -215,26 +210,6 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
                 f" -> Train_loss: {train_loss:.4f} | Val_loss: {val_loss:.4f} | Physics_loss: {physics_loss_val:.4f} | LR: {optimizer.param_groups[0]['lr']:.2e} \n"
                 f" -> MAE :       {mae_str}"
             )
-            # Print cartesian MAE if using spherical coordinates
-            if coord_system == 'spherical':
-                from utils import spherical_to_cartesian
-                all_cart_pred = []
-                all_cart_label = []
-                with torch.no_grad():
-                    for x, y in val_loader:
-                        x = x.to(DEVICE)
-                        y = y.to(DEVICE)
-                        pred = model(x)
-                        pred_denorm = denormalize_labels(pred.cpu(), labels_mean, labels_std)
-                        y_denorm = denormalize_labels(y.cpu(), labels_mean, labels_std)
-                        cart_pred = spherical_to_cartesian(pred_denorm.numpy())
-                        cart_label = spherical_to_cartesian(y_denorm.numpy())
-                        all_cart_pred.append(cart_pred)
-                        all_cart_label.append(cart_label)
-                all_cart_pred = np.concatenate(all_cart_pred, axis=0)
-                all_cart_label = np.concatenate(all_cart_label, axis=0)
-                cart_mae = np.mean(np.abs(all_cart_pred - all_cart_label), axis=0)
-                print(f" -> MAE cartesian:  Ax {cart_mae[0]:.4f} A | Ay {cart_mae[1]:.4f} A | Az {cart_mae[2]:.4f} A")
 
         # Early stopping check
         if early_stopping.step(val_loss, model):
@@ -345,36 +320,12 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
             'metrics': {
                 'mae': [round(float(history[mae_keys[i]][-1]), 4) for i in range(3)],
                 'physics_loss': round(float(history['physics_loss'][-1]), 4) if use_physics_loss is not None else None,
-                'mae_cartesian': [round(float(x), 4) for x in cart_mae] if coord_system == 'spherical' else None
             }
         }
         with open(log_path, 'w') as f:
             json.dump(log_data, f, indent=2)
 
         print(f"Training log saved as {log_path}")
-
-    # === Print cartesian MAE at the end of the training === #
-    if coord_system == 'spherical':
-        from utils import spherical_to_cartesian
-        # Compute true cartesian MAE from all val predictions and labels
-        all_cart_pred = []
-        all_cart_label = []
-        with torch.no_grad():
-            for x, y in val_loader:
-                x = x.to(DEVICE)
-                y = y.to(DEVICE)
-                pred = model(x)
-                pred_denorm = denormalize_labels(pred.cpu(), labels_mean, labels_std)
-                y_denorm = denormalize_labels(y.cpu(), labels_mean, labels_std)
-                cart_pred = spherical_to_cartesian(pred_denorm.numpy())
-                cart_label = spherical_to_cartesian(y_denorm.numpy())
-                all_cart_pred.append(cart_pred)
-                all_cart_label.append(cart_label)
-        all_cart_pred = np.concatenate(all_cart_pred, axis=0)
-        all_cart_label = np.concatenate(all_cart_label, axis=0)
-        cart_mae = np.mean(np.abs(all_cart_pred - all_cart_label), axis=0)
-        print("\nTrue cartesian MAE computed from spherical predictions:")
-        print(f"  Ax = {cart_mae[0]:.4f}  |  Ay = {cart_mae[1]:.4f}  |  Az = {cart_mae[2]:.4f}")
 
 
 if __name__ == "__main__":

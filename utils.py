@@ -76,32 +76,6 @@ def normalize_labels(labels, labels_mean, labels_std):
         return (labels - labels_mean) / (labels_std + 1e-8)
 
 
-def spherical_to_cartesian(spherical):
-    """
-    Convert spherical coordinates (Ar, theta, phi) to cartesian (Ax, Ay, Az).
-    Parameters:
-        spherical: array-like or tensor (..., 3) with [Ar, theta, phi]
-    Returns:
-        cartesian: same shape (..., 3) with [Ax, Ay, Az]
-    """
-    if isinstance(spherical, torch.Tensor):
-        Ar = spherical[..., 0]
-        theta = spherical[..., 1]
-        phi = spherical[..., 2]
-        Ax = Ar * torch.sin(theta) * torch.cos(phi)
-        Ay = Ar * torch.sin(theta) * torch.sin(phi)
-        Az = Ar * torch.cos(theta)
-        return torch.stack([Ax, Ay, Az], dim=-1)
-    else:
-        Ar = spherical[..., 0]
-        theta = spherical[..., 1]
-        phi = spherical[..., 2]
-        Ax = Ar * np.sin(theta) * np.cos(phi)
-        Ay = Ar * np.sin(theta) * np.sin(phi)
-        Az = Ar * np.cos(theta)
-        return np.stack([Ax, Ay, Az], axis=-1)
-
-
 def plot_training_history(history, label_names=['Ax', 'Ay', 'Az'], show=True):
     """Plot training and validation metrics over epochs."""
     epochs = range(1, len(history['train_loss']) + 1)
@@ -283,7 +257,21 @@ def plot_training_history(history, label_names=['Ax', 'Ay', 'Az'], show=True):
 #     return zones.astype(np.int64)
 
 
-def compute_direction_zones(vectors, nv_axes=None):
+def nv_axes():
+    """
+    Return the 4 NV axes as unit vectors in Cartesian coordinates.
+    These correspond to the <111> directions in the diamond lattice.
+    """
+    axes = np.array([
+        [ 0.5,  0.5,  0.70710678],
+        [-0.5, -0.5,  0.70710678],
+        [ 0.5, -0.5, -0.70710678],
+        [-0.5,  0.5, -0.70710678]
+    ], dtype=np.float64)
+    return axes / np.linalg.norm(axes, axis=1, keepdims=True)
+
+
+def compute_direction_zones(vectors, nv_axes=nv_axes()):
     """
     Partition vectors by NV peak ordering (as in ESRpeakOrderPlotterv2.py).
     Each vector is projected onto the 4 NV axes, the order of projections is used as a configuration string.
@@ -297,14 +285,10 @@ def compute_direction_zones(vectors, nv_axes=None):
     v = np.asarray(vectors, dtype=np.float64)
     if nv_axes is None:
         nv_axes = np.array([
-            # [1, -1, 1],
-            # [-1, 1, 1],
-            # [-1, -1, -1],
-            # [1, 1, -1]
-            [-0.5, -0.5,  0.70710678],
-            [ 0.5,  0.5,  0.70710678],
-            [-0.5,  0.5, -0.70710678],
-            [ 0.5, -0.5, -0.70710678]
+            [1, -1, 1],
+            [-1, 1, 1],
+            [-1, -1, -1],
+            [1, 1, -1]
         ], dtype=np.float64)
         nv_axes = nv_axes / np.linalg.norm(nv_axes, axis=1, keepdims=True)
     # Project each vector onto NV axes
@@ -320,7 +304,7 @@ def compute_direction_zones(vectors, nv_axes=None):
     return zones
 
 
-def compute_direction_zones_split_opposite_sign(vectors, nv_axes=None):
+def compute_direction_zones_split_opposite_sign(vectors, nv_axes=nv_axes()):
     """
     Same *ordering* logic as `compute_direction_zones()` (ESRpeakOrderPlotterv2-style: 24 permutations),
     but split each ordering into two disconnected sphere regions ("opposite sign") to obtain 48 zones.
@@ -338,15 +322,6 @@ def compute_direction_zones_split_opposite_sign(vectors, nv_axes=None):
     v = np.asarray(vectors, dtype=np.float64)
     if v.shape[-1] != 3:
         raise ValueError("Last dimension of vectors must be 3.")
-
-    if nv_axes is None:
-        nv_axes = np.array([
-            [-0.5, -0.5,  0.70710678],
-            [ 0.5,  0.5,  0.70710678],
-            [-0.5,  0.5, -0.70710678],
-            [ 0.5, -0.5, -0.70710678]
-        ], dtype=np.float64)
-        nv_axes = nv_axes / np.linalg.norm(nv_axes, axis=1, keepdims=True)
 
     # Projections onto NV axes: (..., 4)
     projections = np.dot(v, nv_axes.T)
@@ -391,14 +366,10 @@ def compute_zones_for_dataset(dataset_dir):
 
     if {"Ax", "Ay", "Az"}.issubset(metadata.columns):
         label_cols = ["Ax", "Ay", "Az"]
-    elif {"Ar", "theta", "phi"}.issubset(metadata.columns):
-        label_cols = ["Ar", "theta", "phi"]
     else:
-        raise ValueError("metadata.csv must contain Ax/Ay/Az or Ar/theta/phi columns.")
+        raise ValueError("metadata.csv must contain Ax/Ay/Az columns.")
     labels_norm = metadata[label_cols].values.astype(np.float32)
     labels_denorm = denormalize_labels(labels_norm, labels_mean, labels_std)
-    if label_cols[0] == "Ar":
-        labels_denorm = spherical_to_cartesian(labels_denorm)
     zones = compute_direction_zones_split_opposite_sign(labels_denorm)
 
     return zones, labels_mean, labels_std
@@ -409,31 +380,31 @@ def visualize_dataset_direction_zones(dataset_dir):
     Visualize how compute_direction_zones partitions the real current directions in a dataset.
     Loads Ax, Ay, Az from metadata.csv in dataset_dir, computes zones, and plots them in 3D.
     """
+    # Load metadata
     metadata_path = os.path.join(dataset_dir, 'metadata.csv')
-
     if not os.path.exists(metadata_path):
         raise FileNotFoundError(f"metadata.csv not found in {dataset_dir}")
+    
     metadata = pd.read_csv(metadata_path)
     if not {'Ax', 'Ay', 'Az'}.issubset(metadata.columns):
         raise ValueError("metadata.csv must contain Ax, Ay, Az columns")
     
-    directions = metadata[['Ax', 'Ay', 'Az']].values
-    
-    directions_norm = metadata[['Ax', 'Ay', 'Az']].values
-    # Load normalization stats and denormalize
+    # Load normalized labels from metadata and denormalize them
+    labels = metadata[['Ax', 'Ay', 'Az']].values
     norm_stats = load_normalization_stats(dataset_dir)
     labels_mean = norm_stats["labels_mean"]
     labels_std = norm_stats["labels_std"]
-    directions = denormalize_labels(directions_norm, labels_mean, labels_std)
+    directions = denormalize_labels(labels, labels_mean, labels_std)
 
+    # Compute zones for these directions
     zones = compute_direction_zones_split_opposite_sign(directions)
-    print(f"Nbr de zones différentes détectées: {len(np.unique(zones))}")
+    print(f"Number of unique zones: {len(np.unique(zones))}")
+
+    # Print number of points 
     x, y, z = directions[:, 0], directions[:, 1], directions[:, 2]
-    # Afficher le nombre de points
-    print(f"Nombre de points (vecteurs de courant): {len(directions)}")
-    # Afficher le nombre de zones différentes détectées
-    nb_zones = len(np.unique(zones))
-    print(f"Nombre de zones différentes détectées: {nb_zones}")
+    print(f"Number of points (current vectors): {len(directions)}")
+
+    # Plot in 3D colored by zone
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
     scatter = ax.scatter(x, y, z, c=zones, cmap='tab20', s=20, alpha=0.8)
@@ -459,9 +430,9 @@ def visualize_zone_vectors_for_dataset(dataset_dir):
         raise ValueError("metadata.csv must contain Ax, Ay, Az columns")
     directions = metadata[['Ax', 'Ay', 'Az']].values
 
-    from utils import compute_zones_for_dataset
     zones, _, _ = compute_zones_for_dataset(dataset_dir)
     x, y, z = directions[:, 0], directions[:, 1], directions[:, 2]
+
     fig = plt.figure(figsize=(12, 9))
     ax = fig.add_subplot(111, projection='3d')
     scatter = ax.scatter(x, y, z, c=zones, cmap='tab20', s=30, alpha=0.8)
@@ -470,8 +441,7 @@ def visualize_zone_vectors_for_dataset(dataset_dir):
     ax.set_ylabel('Ay')
     ax.set_zlabel('Az')
     fig.colorbar(scatter, ax=ax, label='Zone index')
-    # Optionally, show zone distribution
-    import numpy as np
+    # Show zone distribution
     unique_zones, counts = np.unique(zones, return_counts=True)
     print("Zone distribution:")
     for uz, cnt in zip(unique_zones, counts):
@@ -496,7 +466,7 @@ def visualize_vectors_on_sphere(dataset_dir):
     norms = np.linalg.norm(directions, axis=1, keepdims=True)
     unit_vectors = directions / norms
 
-    # Optional: load zones if you want to color points by zone
+    # Load zones to color points by zone
     zones, _, _ = compute_zones_for_dataset(dataset_dir)
 
     x, y, z = unit_vectors[:, 0], unit_vectors[:, 1], unit_vectors[:, 2]
@@ -519,7 +489,7 @@ def visualize_vectors_on_sphere(dataset_dir):
     ax.set_zlabel('Z')
     fig.colorbar(scatter, ax=ax, label='Zone index')
 
-    # Optional: print zone distribution
+    # Show zone distribution
     unique_zones, counts = np.unique(zones, return_counts=True)
     print("Zone distribution:")
     for uz, cnt in zip(unique_zones, counts):
@@ -528,7 +498,7 @@ def visualize_vectors_on_sphere(dataset_dir):
     plt.show()
 
 
-def visualize_sphere_zones_surface(dataset_dir, n_theta=100, n_phi=100, split_opposite_sign=True, same_config_same_color=True):
+def visualize_sphere_zones_surface(n_theta=100, n_phi=100, split_opposite_sign=True, same_config_same_color=True):
     """
     Visualize a fully filled, smooth sphere surface colored by zone using plot_surface and a meshgrid.
     """
@@ -581,4 +551,4 @@ if __name__ =="__main__":
     visualize_dataset_direction_zones(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
     visualize_zone_vectors_for_dataset(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
     visualize_vectors_on_sphere(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
-    visualize_sphere_zones_surface(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
+    visualize_sphere_zones_surface()

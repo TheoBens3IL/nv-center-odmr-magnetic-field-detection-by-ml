@@ -2,6 +2,6 @@ __pycache__/
 *.pyc
 .vscode/
 datasets_raw/
-datasets_pytorch/dataset_10ElliptConf_V2_prepared/
+
 NV_ordeing_by_projection_10.csv
 ESRpeakOrderPlotterv2.py

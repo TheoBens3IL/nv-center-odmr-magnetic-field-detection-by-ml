@@ -40,44 +40,6 @@ def load_currents(currents_file):
     return Ax, Ay, Az
 
 
-def cartesian_to_spherical(Ax, Ay, Az):
-    """
-    Convert cartesian current coordinates (Ax, Ay, Az) to spherical (Ar, theta, phi). 
-    Parameters:
-        Ax, Ay, Az : np.ndarray
-            Cartesian current components
-    Returns:
-        tuple : (Ar, theta, phi)
-            Ar : radial magnitude (0 to infinity)
-            theta : elevation angle from z-axis (0 to π)
-            phi : azimuthal angle in xy-plane (-π to π)
-    Notes:
-        - Ar = sqrt(Ax² + Ay² + Az²)
-        - theta = arccos(Az/Ar)  [0, π]
-        - phi = arctan2(Ay, Ax)  [-π, π]
-        - Singularity handling: when Ar~0, set theta=phi=0
-    """
-    Ar = np.sqrt(Ax**2 + Ay**2 + Az**2)
-    
-    # Handle singularity when Ar is very small
-    theta = np.zeros_like(Ar)
-    phi = np.zeros_like(Ar)
-    
-    # Only compute angles where magnitude is significant
-    mask = Ar > 1e-8
-    theta[mask] = np.arccos(np.clip(Az[mask] / Ar[mask], -1.0, 1.0))
-    phi[mask] = np.arctan2(Ay[mask], Ax[mask])
-    
-    return Ar, theta, phi
-
-
-def spherical_to_cartesian(Ar, theta, phi):
-    Ax = Ar * np.sin(theta) * np.cos(phi)
-    Ay = Ar * np.sin(theta) * np.sin(phi)
-    Az = Ar * np.cos(theta)
-    return Ax, Ay, Az
-
-
 def load_esr_multi_mw(esr_file, n_mw_configs=10):
     """
     Load raw ESR data from SPLIT file with MW configurations.
@@ -149,7 +111,7 @@ def normalize_global(signals):
     return (signals - global_mean) / (global_std + 1e-8)
 
 
-def create_pytorch_dataset(dataset_dir, output_dir, coordinate_system='cartesian', filter_spectra=False, filter_type='gaussian', filter_kwargs=None):
+def create_pytorch_dataset(dataset_dir, output_dir):
     """
     Process raw ODMR data into PyTorch-compatible format.
     Parameters:
@@ -157,8 +119,6 @@ def create_pytorch_dataset(dataset_dir, output_dir, coordinate_system='cartesian
             Directory containing raw data (currents CSV + ESR SPLIT files)
         output_dir : str or Path
             Output directory to save processed dataset
-        coordinate_system : str
-            'cartesian' for (Ax, Ay, Az) or 'spherical' for (Ar, theta, phi)
     """
     dataset_dir = Path(dataset_dir)
     output_dir = Path(output_dir)
@@ -168,7 +128,7 @@ def create_pytorch_dataset(dataset_dir, output_dir, coordinate_system='cartesian
     signals_dir = output_dir / 'signals'
     signals_dir.mkdir(exist_ok=True)
     
-    # Find currents CSV (take the most recent one)
+    # Find currents CSV
     currents_csv = list(dataset_dir.glob('3Dcurrents_sweep_*.csv'))
     if not currents_csv:
         raise FileNotFoundError(f"No currents CSV found in {dataset_dir}")
@@ -189,79 +149,39 @@ def create_pytorch_dataset(dataset_dir, output_dir, coordinate_system='cartesian
         print(f"Found {len(split_files)} SPLIT files (generic pattern)")
     else:
         print(f"Found {len(split_files)} SPLIT files matching timestamp {csv_timestamp}")
-    
     if len(split_files) == 0:
         raise FileNotFoundError(f"No SPLIT files found in {dataset_dir}")
     
     # Load currents
     Ax, Ay, Az = load_currents(currents_csv)
-    
-    # Convert to spherical if requested
-    if coordinate_system == 'spherical':
-        Ar, theta, phi = cartesian_to_spherical(Ax, Ay, Az)
-        # Replace Ax, Ay, Az with spherical coordinates
-        Ax, Ay, Az = Ar, theta, phi
-        label_names = ['Ar', 'theta', 'phi']
-    else:
-        label_names = ['Ax', 'Ay', 'Az']
-    
-    # Process first file to get frequencies
+    label_names = ['Ax', 'Ay', 'Az']
     frequencies, _ = load_esr_multi_mw(split_files[0])
     freq_path = output_dir / 'frequencies.npy'
     np.save(freq_path, frequencies.astype(np.float32))
     all_signals = []
     for split_path in tqdm(split_files, desc="Loading signals"):
-        _, signals = load_esr_multi_mw(split_path)  # Shape: (10, 201)
+        _, signals = load_esr_multi_mw(split_path)
         all_signals.append(signals)
     all_signals = np.stack(all_signals, axis=0)
 
-    # Optional filtering
-    if filter_spectra:
-        if filter_type == 'savgol':
-            from scipy.signal import savgol_filter
-            all_signals = savgol_filter(all_signals, **filter_kwargs, axis=2)
-        elif filter_type == 'gaussian':
-            from scipy.ndimage import gaussian_filter1d
-            all_signals = gaussian_filter1d(all_signals, **filter_kwargs, axis=2)
-        else:
-            raise ValueError(f"Unknown filter_type: {filter_type}")
-
-    # Apply global normalization
+    # Apply global normalization to signals before saving (preserves relative differences between spectra)
     all_signals = normalize_global(all_signals)
     
     # Stack all signals: (2109, 10, 201)
     all_signals = np.stack(all_signals, axis=0)
-    
-    # Apply global normalization
-    all_signals = normalize_global(all_signals)
-    
-    # Create metadata DataFrame with NORMALIZED labels
+
     # Compute normalization stats
     labels_mean = np.array([Ax[:len(split_files)].mean(), 
                             Ay[:len(split_files)].mean(), 
                             Az[:len(split_files)].mean()], dtype=np.float32)
-    
-    if coordinate_system == 'spherical':
-        # Spherical normalization: use actual std for all components
-        # This ensures proper metric calculation during training
-        ar_std = Ax[:len(split_files)].std()      # Ax now contains Ar
-        theta_std = Ay[:len(split_files)].std()   # Ay now contains theta
-        phi_std = Az[:len(split_files)].std()     # Az now contains phi
-        labels_std = np.array([ar_std, theta_std, phi_std], dtype=np.float32)
-    else:
-        # Use GLOBAL std (max of all components) to preserve physical proportions
-        # This prevents artificially amplifying Ax (which varies less physically)
-        ax_std = Ax[:len(split_files)].std()
-        ay_std = Ay[:len(split_files)].std()
-        az_std = Az[:len(split_files)].std()
-        global_std = max(ax_std, ay_std, az_std)
-        labels_std = np.array([global_std, global_std, global_std], dtype=np.float32)
-        
-    # Save normalization stats for later denormalization
+    ax_std = Ax[:len(split_files)].std()
+    ay_std = Ay[:len(split_files)].std()
+    az_std = Az[:len(split_files)].std()
+    global_std = max(ax_std, ay_std, az_std)
+    labels_std = np.array([global_std, global_std, global_std], dtype=np.float32)
     normalization_stats = {
         'labels_mean': labels_mean,
         'labels_std': labels_std,
-        'coordinate_system': coordinate_system
     }
     np.save(output_dir / 'normalization_stats.npy', normalization_stats)
     
@@ -270,6 +190,7 @@ def create_pytorch_dataset(dataset_dir, output_dir, coordinate_system='cartesian
     Ay_norm = (Ay[:len(split_files)] - labels_mean[1]) / (labels_std[1] + 1e-8)
     Az_norm = (Az[:len(split_files)] - labels_mean[2]) / (labels_std[2] + 1e-8)
     
+    # Create metadata DataFrame with normalized labels
     metadata = pd.DataFrame({
         'experiment_id': range(len(split_files)),
         label_names[0]: Ax_norm.astype(np.float32),
@@ -307,52 +228,27 @@ def create_pytorch_dataset(dataset_dir, output_dir, coordinate_system='cartesian
 
 
 def main():
-    """Main function to process the dataset."""
-    
     parser = argparse.ArgumentParser(description='Prepare ODMR dataset for training')
-    parser.add_argument('--coordinate_system', type=str, default='cartesian',
-                       choices=['cartesian', 'spherical'],
-                       help='Coordinate system for current labels: cartesian (Ax,Ay,Az) or spherical (Ar,theta,phi)')
     parser.add_argument('--dataset_dir', type=str, default='dataset_10ElliptConf_V2',
                        help='Input directory with raw data (default: dataset_10ElliptConf_V2 in datasets_raw/)')
     parser.add_argument('--output_dir', type=str, default=None,
                        help='Output directory (default: auto-generated from input name)')
-    parser.add_argument('--filter_spectra', action='store_true', help='Apply spectral filtering to signals before saving')
-    parser.add_argument('--filter_type', type=str, default='gaussian', choices=['gaussian', 'savgol'], help='Type of filter to apply (default: gaussian)')
-    parser.add_argument('--filter_sigma', type=float, default=2.0, help='Sigma for Gaussian filter (default: 2.0)')
-    parser.add_argument('--filter_window', type=int, default=15, help='Window length for Savitzky-Golay filter (default: 15)')
-    parser.add_argument('--filter_polyorder', type=int, default=3, help='Polyorder for Savitzky-Golay filter (default: 3)')
-
     args = parser.parse_args()
-    
-    # Resolve input path (auto-add datasets_raw/)
     input_dir = os.path.join("datasets_raw", args.dataset_dir)
-    
-    # Set output directory based on input name if not specified
     if args.output_dir:
         output_dir = os.path.join("datasets_pytorch", args.output_dir)
     else:
-        # Auto-generate from input directory name in datasets_pytorch/
         base_name = Path(input_dir).name
-        if args.coordinate_system == 'spherical':
-            output_dir = f'datasets_pytorch/{base_name}_prepared_spherical'
-        else:
-            output_dir = f'datasets_pytorch/{base_name}_prepared'
-        
-        # Create datasets_pytorch parent directory if needed
+        output_dir = f'datasets_pytorch/{base_name}_prepared'
         Path('datasets_pytorch').mkdir(exist_ok=True)
     
     print(f"\n{'='*60}")
     print(f"DATASET PREPARATION")
     print(f"{'='*60}")
-    print(f"Coordinate system: {args.coordinate_system.upper()}")
     print(f"Input directory: {input_dir}")
     print(f"Output directory: {output_dir}")
     print(f"{'='*60}\n")
-    
-    # Create dataset
-    create_pytorch_dataset(input_dir, output_dir, args.coordinate_system)
-
+    create_pytorch_dataset(input_dir, output_dir)
 
 if __name__ == "__main__":
     main()

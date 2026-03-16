@@ -115,17 +115,12 @@ class ODMR_CNN_Deep(nn.Module):
             nn.ReLU(),
             nn.BatchNorm1d(128),
             nn.MaxPool1d(2),
-
-            nn.Conv1d(128, 256, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.BatchNorm1d(256),
-            nn.MaxPool1d(2),
         )
         
         # Compute flattened size after pooling
-        pooled_freq = n_freq // 8  # 5x MaxPool1d(2) -> freq // 16
+        pooled_freq = n_freq // 4
         self.fc = nn.Sequential(
-            nn.Linear(256 * pooled_freq, 256),
+            nn.Linear(128 * pooled_freq, 256),
             nn.ReLU(),
             nn.Linear(256, output_dim)
         )
@@ -319,7 +314,7 @@ class ZoneClassifier(nn.Module):
     Classifier that predicts a discrete direction zone index from multi-config ODMR signals.
     Expects input shape (batch, 10, 201) and outputs logits over n_zones classes.
     """
-    def __init__(self, n_channels=10, n_freq=201, n_zones=48, dropout_rate=0.3):
+    def __init__(self, n_channels=10, n_freq=201, n_zones=48, dropout_rate=0.1):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv1d(n_channels, 64, kernel_size=5, padding=2),

@@ -9,6 +9,7 @@ from train_zone_models import ZoneSubset
 from utils import load_normalization_stats, denormalize_labels, compute_zones_for_dataset
 from dataset import train_val_test_split
 from sklearn.metrics import r2_score
+import matplotlib.pyplot as plt
 
 
 def load_model(model_name, model_dir, dataset_dir, device='cpu'):
@@ -111,11 +112,11 @@ def evaluate_two_stage(model, test_loader, device='cpu'):
     return y_pred, y_true, zones_cat
 
 
-def compute_metrics(y_pred, y_true, labels_mean, labels_std, coord_system):
+def compute_metrics(y_pred, y_true, labels_mean, labels_std):
     y_pred_denorm = denormalize_labels(y_pred, labels_mean, labels_std).numpy()
     y_true_denorm = denormalize_labels(y_true, labels_mean, labels_std).numpy()
-    units = ['A']*3 if coord_system == 'cartesian' else ['A', 'rad', 'rad']
-    label_names = ['Ax', 'Ay', 'Az'] if coord_system == 'cartesian' else ['Ar', 'theta', 'phi']
+    units = ['A']*3
+    label_names = ['Ax', 'Ay', 'Az']
     results = {}
     for i, name in enumerate(label_names):
         mae = float(np.abs(y_pred_denorm[:, i] - y_true_denorm[:, i]).mean())
@@ -156,15 +157,15 @@ def compute_metrics(y_pred, y_true, labels_mean, labels_std, coord_system):
     return results
 
 
-def plot_test_precision(y_pred, y_true, labels_mean, labels_std, coord_system='cartesian', save_path=None):
+def plot_test_precision(y_pred, y_true, labels_mean, labels_std, save_path=None):
     """
     Visualize test prediction precision: histograms and scatter plots of errors per axis.
     """
     import matplotlib.pyplot as plt
     y_pred_denorm = denormalize_labels(y_pred, labels_mean, labels_std).numpy()
     y_true_denorm = denormalize_labels(y_true, labels_mean, labels_std).numpy()
-    label_names = ['Ax', 'Ay', 'Az'] if coord_system == 'cartesian' else ['Ar', 'theta', 'phi']
-    units = ['A', 'A', 'A'] if coord_system == 'cartesian' else ['A', 'rad', 'rad']
+    label_names = ['Ax', 'Ay', 'Az']
+    units = ['A', 'A', 'A']
     errors = y_pred_denorm - y_true_denorm
 
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
@@ -195,15 +196,14 @@ def plot_test_precision(y_pred, y_true, labels_mean, labels_std, coord_system='c
     else:
         plt.show()
 
-def plot_zone_precision(y_pred, y_true, zones, labels_mean, labels_std, coord_system='cartesian', save_path=None):
+def plot_zone_precision(y_pred, y_true, zones, labels_mean, labels_std, save_path=None):
     """
     Visualize prediction errors as a heatmap: mean error per zone and axis.
     """
-    import matplotlib.pyplot as plt
     y_pred_denorm = denormalize_labels(y_pred, labels_mean, labels_std).numpy()
     y_true_denorm = denormalize_labels(y_true, labels_mean, labels_std).numpy()
-    label_names = ['Ax', 'Ay', 'Az'] if coord_system == 'cartesian' else ['Ar', 'theta', 'phi']
-    units = ['A', 'A', 'A'] if coord_system == 'cartesian' else ['A', 'rad', 'rad']
+    label_names = ['Ax', 'Ay', 'Az']
+    units = ['A', 'A', 'A']
     errors = np.abs(y_pred_denorm - y_true_denorm)
     # Ensure zones is a numpy array and matches test set length
     zones_np = zones.cpu().numpy() if hasattr(zones, 'cpu') else np.array(zones)
@@ -263,12 +263,6 @@ def main():
         if not (args.dataset_dir.startswith('datasets_pytorch') or os.path.isabs(args.dataset_dir)):
             args.dataset_dir = os.path.join("datasets_pytorch", args.dataset_dir)
 
-    # Infer coordinate system from dataset_dir
-    if 'spherical' in args.dataset_dir.lower():
-        coord_system = 'spherical'
-    else:
-        coord_system = 'cartesian'
-
     test_loader, labels_mean, labels_std = get_test_loader(args.dataset_dir, model_name, batch_size=64)
     model = load_model(model_name, model_dir, args.dataset_dir, device=device)
     if args.model.lower() == 'zoneclassifier':
@@ -276,15 +270,15 @@ def main():
         return
     elif args.model.lower() == 'zoneawareregressor':
         y_pred, y_true, zones = evaluate_regressor(model, test_loader, device=device)
-        plot_zone_precision(y_pred, y_true, zones, labels_mean, labels_std, coord_system=coord_system)
+        plot_zone_precision(y_pred, y_true, zones, labels_mean, labels_std)
     elif args.model.lower() == 'zoneawaretwostage' or args.model.lower() == 'zoneawaretwostage_joint':
         y_pred, y_true, zones = evaluate_two_stage(model, test_loader, device=device)
-        plot_zone_precision(y_pred, y_true, zones, labels_mean, labels_std, coord_system=coord_system)
+        plot_zone_precision(y_pred, y_true, zones, labels_mean, labels_std)
     else:
         y_pred, y_true = evaluate_cnn(model, test_loader, device=device)
     
-    compute_metrics(y_pred, y_true, labels_mean, labels_std, coord_system=coord_system)
-    plot_test_precision(y_pred, y_true, labels_mean, labels_std, coord_system=coord_system)
+    compute_metrics(y_pred, y_true, labels_mean, labels_std)
+    plot_test_precision(y_pred, y_true, labels_mean, labels_std)
 
 
 if __name__ == '__main__':
