@@ -4,6 +4,9 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset, Subset, DataLoader
 from sklearn.model_selection import train_test_split
+from sklearn.utils import shuffle
+from collections import defaultdict
+from utils import compute_zones_for_dataset
 
 
 class ODMRDatasetMultiConfig(Dataset):
@@ -21,7 +24,6 @@ class ODMRDatasetMultiConfig(Dataset):
         self.signals_dir = os.path.join(self.dataset_dir, "signals")
         self.metadata = pd.read_csv(os.path.join(self.dataset_dir, "metadata.csv"))
         self.transform = transform
-        
         # Detect label columns (cartesian or spherical)
         if 'Ax' in self.metadata.columns:
             self.label_cols = ['Ax', 'Ay', 'Az']
@@ -45,6 +47,7 @@ class ODMRDatasetMultiConfig(Dataset):
 
         # Load all 10 MW configurations for this experiment
         signals = np.load(os.path.join(self.signals_dir, f"config_{config_id:04d}.npy"))  # (10, 201)
+
         spectrum = torch.from_numpy(signals).float()  # (10, N_freq)
 
         label = torch.tensor([row[self.label_cols[0]], row[self.label_cols[1]], row[self.label_cols[2]]], dtype=torch.float32)
@@ -83,6 +86,78 @@ def train_val_test_split(dataset_dir, val_size=0.15, test_size=0.15, random_stat
         Subset(full_dataset, val_idx),
         Subset(full_dataset, test_idx),
     )
+
+
+def stratified_zone_split(dataset_dir, val_size=0.15, test_size=0.15, random_state=1):
+    """
+    Split the dataset by zone indices into train, val, and test sets, ensuring each split contains at least one sample from each zone (if possible) and homogeneous repartition.
+    Args:
+        dataset_dir: Path to dataset directory
+        val_size: Validation set size (fraction)
+        test_size: Test set size (fraction)
+        random_state: Random seed for reproducibility
+    Returns:
+        train_subset, val_subset, test_subset
+    """
+    full_dataset = ODMRDatasetMultiConfig(dataset_dir)
+    
+    # Compute zones for all samples
+    zones, _, _ = compute_zones_for_dataset(dataset_dir)
+    zones = np.array(zones)
+    print("Unique zones in full dataset:", np.unique(zones))
+
+    # Group indices by zone
+    zone_indices = defaultdict(list)
+    for idx, zone in enumerate(zones):
+        zone_indices[int(zone)].append(idx)
+
+    train_idx, val_idx, test_idx = [], [], []
+    rng = np.random.RandomState(random_state)
+    for zone, indices in zone_indices.items():
+        indices = shuffle(indices, random_state=rng)
+        n = len(indices)
+        n_test = max(1, int(np.round(test_size * n)))
+        n_val = max(1, int(np.round(val_size * n)))
+        n_train = n - n_test - n_val
+        # If not enough samples, adjust splits
+        if n_train < 0:
+            n_train = 0
+        if n_train + n_val + n_test > n:
+            n_test = n - n_train - n_val
+        train_idx.extend(indices[:n_train])
+        val_idx.extend(indices[n_train:n_train+n_val])
+        test_idx.extend(indices[n_train+n_val:])
+
+    # Shuffle final indices
+    train_idx = shuffle(train_idx, random_state=rng)
+    val_idx = shuffle(val_idx, random_state=rng)
+    test_idx = shuffle(test_idx, random_state=rng)
+
+    # Ensure every split contains at least one sample from every zone
+    all_zones = set(zone_indices.keys())
+    for split_name, split_idx in zip(["train", "val", "test"], [train_idx, val_idx, test_idx]):
+        split_zones = set(zones[split_idx])
+        missing_zones = all_zones - split_zones
+        if missing_zones:
+            for mz in missing_zones:
+                # Find a sample from the missing zone not already in this split
+                candidates = [i for i in zone_indices[mz] if i not in split_idx]
+                if candidates:
+                    split_idx.append(candidates[0])
+                else:
+                    # If all samples are already in other splits, forcibly move one
+                    split_idx.append(zone_indices[mz][0])
+
+    print("Unique zones in train split:", np.unique(zones[train_idx]))
+    print("Unique zones in val split:", np.unique(zones[val_idx]))
+    print("Unique zones in test split:", np.unique(zones[test_idx]))
+
+    return (
+        Subset(full_dataset, train_idx),
+        Subset(full_dataset, val_idx),
+        Subset(full_dataset, test_idx),
+    )
+
 
 def get_data_loaders(train_set, val_set, test_set, batch_size=32, device="cpu"):
     """
@@ -161,3 +236,7 @@ def print_dataset_statistics(train_set, val_set, test_set, label_names, labels_m
     print(f"  mean={all_signals.mean():.3f}, std={all_signals.std():.3f}, min={all_signals.min():.3f}, max={all_signals.max():.3f}")
     print("=" * 60)
     print()
+
+
+if __name__ == "__main__":
+    stratified_zone_split("datasets_pytorch/dataset_multi_mw_2", val_size=0.15, test_size=0.15, random_state=1)

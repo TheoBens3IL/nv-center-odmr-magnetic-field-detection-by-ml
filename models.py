@@ -115,12 +115,17 @@ class ODMR_CNN_Deep(nn.Module):
             nn.ReLU(),
             nn.BatchNorm1d(128),
             nn.MaxPool1d(2),
+
+            nn.Conv1d(128, 256, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm1d(256),
+            nn.MaxPool1d(2),
         )
         
         # Compute flattened size after pooling
-        pooled_freq = n_freq // 4
+        pooled_freq = n_freq // 8  # 5x MaxPool1d(2) -> freq // 16
         self.fc = nn.Sequential(
-            nn.Linear(128 * pooled_freq, 256),
+            nn.Linear(256 * pooled_freq, 256),
             nn.ReLU(),
             nn.Linear(256, output_dim)
         )

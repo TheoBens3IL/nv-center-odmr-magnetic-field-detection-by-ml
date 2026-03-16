@@ -149,7 +149,7 @@ def normalize_global(signals):
     return (signals - global_mean) / (global_std + 1e-8)
 
 
-def create_pytorch_dataset(dataset_dir, output_dir, coordinate_system='cartesian'):
+def create_pytorch_dataset(dataset_dir, output_dir, coordinate_system='cartesian', filter_spectra=False, filter_type='gaussian', filter_kwargs=None):
     """
     Process raw ODMR data into PyTorch-compatible format.
     Parameters:
@@ -207,17 +207,27 @@ def create_pytorch_dataset(dataset_dir, output_dir, coordinate_system='cartesian
     
     # Process first file to get frequencies
     frequencies, _ = load_esr_multi_mw(split_files[0])
-    
-    # Save frequencies
     freq_path = output_dir / 'frequencies.npy'
     np.save(freq_path, frequencies.astype(np.float32))
-    
-    # Collect all signals first for global normalization
     all_signals = []
-    
     for split_path in tqdm(split_files, desc="Loading signals"):
         _, signals = load_esr_multi_mw(split_path)  # Shape: (10, 201)
         all_signals.append(signals)
+    all_signals = np.stack(all_signals, axis=0)
+
+    # Optional filtering
+    if filter_spectra:
+        if filter_type == 'savgol':
+            from scipy.signal import savgol_filter
+            all_signals = savgol_filter(all_signals, **filter_kwargs, axis=2)
+        elif filter_type == 'gaussian':
+            from scipy.ndimage import gaussian_filter1d
+            all_signals = gaussian_filter1d(all_signals, **filter_kwargs, axis=2)
+        else:
+            raise ValueError(f"Unknown filter_type: {filter_type}")
+
+    # Apply global normalization
+    all_signals = normalize_global(all_signals)
     
     # Stack all signals: (2109, 10, 201)
     all_signals = np.stack(all_signals, axis=0)
@@ -307,7 +317,12 @@ def main():
                        help='Input directory with raw data (default: dataset_10ElliptConf_V2 in datasets_raw/)')
     parser.add_argument('--output_dir', type=str, default=None,
                        help='Output directory (default: auto-generated from input name)')
-    
+    parser.add_argument('--filter_spectra', action='store_true', help='Apply spectral filtering to signals before saving')
+    parser.add_argument('--filter_type', type=str, default='gaussian', choices=['gaussian', 'savgol'], help='Type of filter to apply (default: gaussian)')
+    parser.add_argument('--filter_sigma', type=float, default=2.0, help='Sigma for Gaussian filter (default: 2.0)')
+    parser.add_argument('--filter_window', type=int, default=15, help='Window length for Savitzky-Golay filter (default: 15)')
+    parser.add_argument('--filter_polyorder', type=int, default=3, help='Polyorder for Savitzky-Golay filter (default: 3)')
+
     args = parser.parse_args()
     
     # Resolve input path (auto-add datasets_raw/)

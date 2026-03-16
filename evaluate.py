@@ -77,7 +77,7 @@ def evaluate_regressor(model, test_loader, device='cpu'):
             all_labels.append(labels.cpu())
     y_pred = torch.cat(all_preds, dim=0)
     y_true = torch.cat(all_labels, dim=0)
-    return y_pred, y_true
+    return y_pred, y_true, zones
 
 
 def evaluate_classifier(model, test_loader, device='cpu'):
@@ -95,7 +95,7 @@ def evaluate_classifier(model, test_loader, device='cpu'):
 
 
 def evaluate_two_stage(model, test_loader, device='cpu'):
-    all_preds, all_labels = [], []
+    all_preds, all_labels, all_zones = [], [], []
     with torch.no_grad():
         for signals, labels, zones_true in test_loader:
             signals, labels, zones_true = signals.to(device), labels.to(device), zones_true.to(device)
@@ -104,9 +104,11 @@ def evaluate_two_stage(model, test_loader, device='cpu'):
             preds = model.forward_regressor(signals, zones_pred)
             all_preds.append(preds.cpu())
             all_labels.append(labels.cpu())
+            all_zones.append(zones_true.cpu())
     y_pred = torch.cat(all_preds, dim=0)
     y_true = torch.cat(all_labels, dim=0)
-    return y_pred, y_true
+    zones_cat = torch.cat(all_zones, dim=0)
+    return y_pred, y_true, zones_cat
 
 
 def compute_metrics(y_pred, y_true, labels_mean, labels_std, coord_system):
@@ -154,9 +156,93 @@ def compute_metrics(y_pred, y_true, labels_mean, labels_std, coord_system):
     return results
 
 
+def plot_test_precision(y_pred, y_true, labels_mean, labels_std, coord_system='cartesian', save_path=None):
+    """
+    Visualize test prediction precision: histograms and scatter plots of errors per axis.
+    """
+    import matplotlib.pyplot as plt
+    y_pred_denorm = denormalize_labels(y_pred, labels_mean, labels_std).numpy()
+    y_true_denorm = denormalize_labels(y_true, labels_mean, labels_std).numpy()
+    label_names = ['Ax', 'Ay', 'Az'] if coord_system == 'cartesian' else ['Ar', 'theta', 'phi']
+    units = ['A', 'A', 'A'] if coord_system == 'cartesian' else ['A', 'rad', 'rad']
+    errors = y_pred_denorm - y_true_denorm
+
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    fig.suptitle('Test Prediction Precision', fontsize=16, fontweight='bold')
+    for i, name in enumerate(label_names):
+        # Histogram of errors
+        ax = axes[0, i]
+        ax.hist(errors[:, i], bins=40, color='skyblue', edgecolor='black', alpha=0.7)
+        ax.set_title(f'Error Histogram: {name} ({units[i]})')
+        ax.set_xlabel('Prediction Error')
+        ax.set_ylabel('Count')
+        ax.grid(True, alpha=0.3)
+
+        # Scatter plot: true vs predicted
+        ax = axes[1, i]
+        ax.scatter(y_true_denorm[:, i], y_pred_denorm[:, i], s=10, alpha=0.6, c='orange')
+        ax.plot([y_true_denorm[:, i].min(), y_true_denorm[:, i].max()],
+                [y_true_denorm[:, i].min(), y_true_denorm[:, i].max()], 'k--', lw=2)
+        ax.set_title(f'True vs Predicted: {name} ({units[i]})')
+        ax.set_xlabel('True Value')
+        ax.set_ylabel('Predicted Value')
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Test precision plot saved to {save_path}")
+    else:
+        plt.show()
+
+def plot_zone_precision(y_pred, y_true, zones, labels_mean, labels_std, coord_system='cartesian', save_path=None):
+    """
+    Visualize prediction errors as a heatmap: mean error per zone and axis.
+    """
+    import matplotlib.pyplot as plt
+    y_pred_denorm = denormalize_labels(y_pred, labels_mean, labels_std).numpy()
+    y_true_denorm = denormalize_labels(y_true, labels_mean, labels_std).numpy()
+    label_names = ['Ax', 'Ay', 'Az'] if coord_system == 'cartesian' else ['Ar', 'theta', 'phi']
+    units = ['A', 'A', 'A'] if coord_system == 'cartesian' else ['A', 'rad', 'rad']
+    errors = np.abs(y_pred_denorm - y_true_denorm)
+    # Ensure zones is a numpy array and matches test set length
+    zones_np = zones.cpu().numpy() if hasattr(zones, 'cpu') else np.array(zones)
+    if len(zones_np.shape) > 1:
+        zones_np = zones_np.squeeze()
+    # If length mismatch, use only the last len(errors) elements
+    if len(zones_np) != len(errors):
+        zones_np = zones_np[-len(errors):]
+    n_zones = int(np.max(zones_np)) + 1
+
+    # Compute mean error per zone and axis
+    mean_error = np.zeros((n_zones, len(label_names)))
+    for z in range(n_zones):
+        for i in range(len(label_names)):
+            zone_mask = (zones_np == z)
+            zone_err = errors[zone_mask, i]
+            mean_error[z, i] = np.mean(zone_err) if len(zone_err) > 0 else np.nan
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    im = ax.imshow(mean_error, aspect='auto', cmap='viridis', interpolation='nearest')
+    ax.set_title('Mean Absolute Error by Zone and Axis', fontsize=16, fontweight='bold')
+    ax.set_xlabel('Axis')
+    ax.set_ylabel('Zone Index')
+    ax.set_xticks(np.arange(len(label_names)))
+    ax.set_xticklabels([f'{name} ({units[i]})' for i, name in enumerate(label_names)])
+    ax.set_yticks(np.arange(n_zones))
+    ax.set_yticklabels([str(z) for z in range(n_zones)])
+    cbar = fig.colorbar(im, ax=ax, label='Mean Absolute Error')
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Zone precision heatmap saved to {save_path}")
+    else:
+        plt.show()
+
+
 def main():
     parser = argparse.ArgumentParser(description='Evaluate a trained model on its test set.')
-    parser.add_argument('--model', type=str, required=True, help='Name of the model to evaluate (e.g., "ODMRPredictor", "ZoneAwareRegressor", "ZoneClassifier", "ZoneAwareRegressor_Two_Stage")')
+    parser.add_argument('--model', type=str, required=True, help='Name of the model to evaluate (e.g., "ODMRPredictor", "ZoneAwareRegressor", "ZoneClassifier", "ZoneAwareTwoStage")')
     parser.add_argument('--dataset_dir', type=str, default="dataset_multi_mw_2")
     args = parser.parse_args()
 
@@ -189,13 +275,16 @@ def main():
         evaluate_classifier(model, test_loader, device=device)
         return
     elif args.model.lower() == 'zoneawareregressor':
-        y_pred, y_true = evaluate_regressor(model, test_loader, device=device)
+        y_pred, y_true, zones = evaluate_regressor(model, test_loader, device=device)
+        plot_zone_precision(y_pred, y_true, zones, labels_mean, labels_std, coord_system=coord_system)
     elif args.model.lower() == 'zoneawaretwostage' or args.model.lower() == 'zoneawaretwostage_joint':
-        y_pred, y_true = evaluate_two_stage(model, test_loader, device=device)
+        y_pred, y_true, zones = evaluate_two_stage(model, test_loader, device=device)
+        plot_zone_precision(y_pred, y_true, zones, labels_mean, labels_std, coord_system=coord_system)
     else:
         y_pred, y_true = evaluate_cnn(model, test_loader, device=device)
     
     compute_metrics(y_pred, y_true, labels_mean, labels_std, coord_system=coord_system)
+    plot_test_precision(y_pred, y_true, labels_mean, labels_std, coord_system=coord_system)
 
 
 if __name__ == '__main__':

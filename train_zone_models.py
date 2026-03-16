@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
-from dataset import train_val_test_split
+from dataset import stratified_zone_split
 from utils import denormalize_labels, compute_zones_for_dataset
 import models
 
@@ -53,6 +53,8 @@ def train_classifier(dataset_dir, batch_size, epochs, lr, weight_decay, patience
     dataset_path = os.path.join('datasets_pytorch', dataset_dir)
 
     zones, labels_mean, labels_std = compute_zones_for_dataset(dataset_path)
+    print('DEBUG zones uniques:', np.unique(zones))
+    print('DEBUG zone counts:', np.bincount(zones))
     n_classes = int(zones.max() + 1)
 
     print("=" * 60)
@@ -68,10 +70,12 @@ def train_classifier(dataset_dir, batch_size, epochs, lr, weight_decay, patience
     print(f"Number of zones: {n_classes}")
     print("=" * 60)
 
-    train_base, val_base, test_base = train_val_test_split(dataset_path)
+    train_base, val_base, test_base = stratified_zone_split(dataset_path)
+
     train_set = ZoneSubset(train_base, zones, regression=False)
     val_set = ZoneSubset(val_base, zones, regression=False)
     test_set = ZoneSubset(test_base, zones, regression=False)
+
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=0)
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=0)
@@ -196,7 +200,7 @@ def train_regressor(dataset_dir,batch_size, epochs, lr, weight_decay, patience):
     print(f"Number of zones: {n_classes}")
     print("=" * 60)
 
-    train_base, val_base, test_base = train_val_test_split(dataset_path)
+    train_base, val_base, test_base = stratified_zone_split(dataset_path)
     train_set = ZoneSubset(train_base, zones)
     val_set = ZoneSubset(val_base, zones)
     test_set = ZoneSubset(test_base, zones)
@@ -212,6 +216,15 @@ def train_regressor(dataset_dir,batch_size, epochs, lr, weight_decay, patience):
 
     best_val_mae = float('inf')
     best_model_state = None
+    # --- History for plotting ---
+    history = {
+        'train_loss': [],
+        'val_loss': [],
+        'mae_ax': [],
+        'mae_ay': [],
+        'mae_az': [],
+        'physics_loss': [],  # Not used here, but for compatibility
+    }
     for epoch in range(epochs):
         # ===== Train ==== #
         model.train()
@@ -249,6 +262,14 @@ def train_regressor(dataset_dir,batch_size, epochs, lr, weight_decay, patience):
         mae_denorm = (abs_err_denorm / n_samples).tolist()
         val_mae_mean = np.mean(mae_denorm)
 
+        # --- Update history ---
+        history['train_loss'].append(train_loss)
+        history['val_loss'].append(val_loss)
+        history['mae_ax'].append(mae_denorm[0])
+        history['mae_ay'].append(mae_denorm[1])
+        history['mae_az'].append(mae_denorm[2])
+        history['physics_loss'].append(0.0)
+
         if val_mae_mean < best_val_mae:
             best_val_mae = val_mae_mean
             best_model_state = model.state_dict()
@@ -264,6 +285,12 @@ def train_regressor(dataset_dir,batch_size, epochs, lr, weight_decay, patience):
 
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
+
+    # --- Plot training history ---
+    from utils import plot_training_history
+    fig = plot_training_history(history, label_names=['Ax', 'Ay', 'Az'], show=True)
+    fig.savefig(os.path.join("models_trained", dataset_dir, "zoneawareregressor", "training_history.png"), dpi=150, bbox_inches='tight')
+    print(f"Training history plot saved to models_trained/{dataset_dir}/zoneawareregressor/training_history.png")
 
     # ===== Test eval ===== #
     model.eval()
@@ -332,7 +359,7 @@ def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg
     print("=" * 60)
 
     # ================= DATA ================= #
-    train_base, val_base, test_base = train_val_test_split(dataset_path)
+    train_base, val_base, test_base = stratified_zone_split(dataset_path)
 
     train_set = ZoneSubset(train_base, zones_array=zones)
     val_set = ZoneSubset(val_base, zones_array=zones)
@@ -361,6 +388,15 @@ def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg
 
     best_val_acc = 0.0
     best_cls_state = None
+    # --- History for plotting ---
+    history = {
+        'train_loss': [],
+        'val_loss': [],
+        'mae_ax': [],
+        'mae_ay': [],
+        'mae_az': [],
+        'physics_loss': [],
+    }
     for epoch in range(cls_epochs):
         # Train classifier
         model.train()
@@ -379,11 +415,14 @@ def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg
         # Validation classifier
         model.eval()
         val_loss = 0.0
+        abs_err_denorm = torch.zeros(3, dtype=torch.float64)
+        n_samples = 0
         correct = 0
         total = 0
         with torch.no_grad():
             for signals, labels, zones_true in val_loader:
                 signals = signals.to(device)
+                labels = labels.to(device)
                 zones_true = zones_true.to(device)
                 logits = model.forward_classifier(signals)
                 loss = criterion_cls(logits, zones_true)
@@ -391,8 +430,18 @@ def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg
                 preds = logits.argmax(dim=1)
                 correct += (preds == zones_true).sum().item()
                 total += zones_true.size(0)
+                # For plotting, get regressor MAE (dummy, zeros)
+                abs_err_denorm += torch.zeros(3)
+                n_samples += signals.size(0)
         val_loss /= len(val_loader.dataset)
-        val_acc = correct / total
+        val_acc = correct / total if total > 0 else 0.0
+        # For classifier stage, MAE is zeros
+        history['train_loss'].append(train_loss)
+        history['val_loss'].append(val_loss)
+        history['mae_ax'].append(0.0)
+        history['mae_ay'].append(0.0)
+        history['mae_az'].append(0.0)
+        history['physics_loss'].append(0.0)
 
         if (epoch + 1) % 10 == 0 or epoch == 0:
             print(f"[TwoStage - Classifier] Epoch [{epoch+1:03d}/{cls_epochs}] | Val Accuracy: {val_acc*100:.2f}%")
@@ -587,7 +636,7 @@ def train_two_stage_joint(dataset_dir, batch_size, epochs, cls_lr, reg_lr, cls_w
     print("="*60)
 
     # ===== DATA ===== #
-    train_base, val_base, test_base = train_val_test_split(dataset_path)
+    train_base, val_base, test_base = stratified_zone_split(dataset_path)
 
     train_set = ZoneSubset(train_base, zones_array=zones)
     val_set = ZoneSubset(val_base, zones_array=zones)

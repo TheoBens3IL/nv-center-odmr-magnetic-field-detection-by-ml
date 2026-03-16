@@ -22,7 +22,7 @@ def extract_signals_and_backgrounds(data):
     return frequencies, signals_raw, backgrounds_raw
 
 
-def plot_raw_dataset(dataset_dir):
+def plot_raw_dataset(dataset_dir, filter_spectra=False, filter_type='gaussian', filter_kwargs=None):
     """
     Interactive visualization of raw SPLIT files from multi-MW dataset.
     Allows exploring raw signal/background data before preprocessing.
@@ -72,12 +72,46 @@ def plot_raw_dataset(dataset_dir):
     ax2.set_title('Normalized (S/B)')
     ax2.grid(True, alpha=0.3)
     
-    # Create sliders
+    # Create sliders and checkbox
     ax_exp = plt.axes([0.15, 0.12, 0.7, 0.03])
     ax_meas = plt.axes([0.15, 0.06, 0.7, 0.03])
-    
+    ax_filter = plt.axes([0.15, 0.18, 0.15, 0.04])
+    ax_sigma = plt.axes([0.45, 0.18, 0.2, 0.03])
+    ax_window = plt.axes([0.45, 0.22, 0.2, 0.03])
+    ax_poly = plt.axes([0.45, 0.26, 0.2, 0.03])
+
     slider_exp = Slider(ax_exp, 'Experiment', 0, num_experiments - 1, valinit=0, valstep=1)
     slider_meas = Slider(ax_meas, 'Measurement', 0, signals_raw.shape[0] - 1, valinit=0, valstep=1)
+
+    from matplotlib.widgets import CheckButtons
+    filter_checkbox = CheckButtons(ax_filter, ['Apply Filter'], [filter_spectra])
+
+    # Filter parameter sliders
+    slider_sigma = Slider(ax_sigma, 'Sigma (Gaussian)', 0.1, 10.0, valinit=filter_kwargs['sigma'] if filter_kwargs and 'sigma' in filter_kwargs else 2.0)
+    slider_window = Slider(ax_window, 'Window (Savgol)', 3, 51, valinit=filter_kwargs['window_length'] if filter_kwargs and 'window_length' in filter_kwargs else 15, valstep=2)
+    slider_poly = Slider(ax_poly, 'Polyorder (Savgol)', 1, 10, valinit=filter_kwargs['polyorder'] if filter_kwargs and 'polyorder' in filter_kwargs else 3, valstep=1)
+
+    def apply_filter(normed):
+        if filter_checkbox.get_status()[0]:
+            if filter_type == 'savgol':
+                from scipy.signal import savgol_filter
+                window_length = int(slider_window.val)
+                polyorder = int(slider_poly.val)
+                # Ensure window_length > polyorder and odd
+                if window_length <= polyorder:
+                    window_length = polyorder + 1
+                if window_length % 2 == 0:
+                    window_length += 1
+                return savgol_filter(normed, window_length=window_length, polyorder=polyorder, axis=0)
+            elif filter_type == 'gaussian':
+                from scipy.ndimage import gaussian_filter1d
+                sigma = slider_sigma.val
+                return gaussian_filter1d(normed, sigma=sigma, axis=0)
+            else:
+                raise ValueError(f"Unknown filter_type: {filter_type}")
+        else:
+            return normed
+
     
     # Update function
     def update(val=None):
@@ -88,17 +122,25 @@ def plot_raw_dataset(dataset_dir):
         line1.set_ydata(signals_raw[meas_id, :])
         line1b.set_ydata(backgrounds_raw[meas_id, :])
         normalized = signals_raw[meas_id, :] / backgrounds_raw[meas_id, :]
-        line2.set_ydata(normalized)
+        filtered_normed = apply_filter(normalized)
+        line2.set_ydata(filtered_normed)
         ax1.set_title(f'Exp {exp_id} — Raw Signal & Background (meas {meas_id}) — Ax={Ax[exp_id]:.2f} A, Ay={Ay[exp_id]:.2f} A, Az={Az[exp_id]:.2f} A')
         for ax in [ax1, ax2]:
             ax.relim()
             ax.autoscale_view(scalex=False, scaley=True)
         fig.canvas.draw_idle()
-    
-    # Connect sliders
+
+    # Checkbox callback
+    def on_filter_checkbox(label):
+        update()
+
+    filter_checkbox.on_clicked(on_filter_checkbox)
     slider_exp.on_changed(update)
     slider_meas.on_changed(update)
-    
+    slider_sigma.on_changed(update)
+    slider_window.on_changed(update)
+    slider_poly.on_changed(update)
+    update()
     plt.show()
 
 
