@@ -119,6 +119,20 @@ def nv_rotation_matrices(device):
     ], dtype=torch.float32, device=device)
 
 
+def nv_axes():
+    """
+    Return the 4 NV axes as unit vectors in Cartesian coordinates.
+    These correspond to the <111> directions in the diamond lattice.
+    """
+    axes = np.array([
+        [ 0.5,  0.5,  0.70710678],
+        [-0.5, -0.5,  0.70710678],
+        [ 0.5, -0.5, -0.70710678],
+        [-0.5,  0.5, -0.70710678]
+    ], dtype=np.float64)
+    return axes / np.linalg.norm(axes, axis=1, keepdims=True)
+
+
 def nv_transitions_4axes(B_lab):
     """
     B_lab: (batch, 3) in Tesla

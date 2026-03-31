@@ -1,23 +1,37 @@
 import os
 import json
-from evaluate import evaluate_model
+import torch
+from evaluate import load_model, get_test_loader, evaluate_cnn, evaluate_regressor, evaluate_two_stage, compute_metrics
 
 # Dossier racine des modèles
 MODELS_ROOT = "models_trained"
 # Dataset à comparer
-DATASET = "dataset_multi_mw"
+DATASET = "dataset_multi_mw_2"
 # Liste des modèles à comparer
 MODEL_NAMES = ["ODMR_CNN", "ODMR_CNN_Compact", "ODMR_CNN_Deep", "FrequencyAttention", "MWConfig_CNN", "HybridODMRPredictor"]
 
+
 # Résultats
 results = {}
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 for model_name in MODEL_NAMES:
     model_dir = os.path.join(MODELS_ROOT, DATASET, model_name.lower())
     if not os.path.exists(model_dir):
         print(f"[WARN] Model dir not found: {model_dir}")
         continue
-    metrics = evaluate_model(model_name, model_dir=model_dir, dataset_dir=DATASET, show=False)
+    dataset_dir = os.path.join("datasets_pytorch", DATASET)
+    test_loader, labels_mean, labels_std = get_test_loader(dataset_dir, model_name, batch_size=64)
+    model = load_model(model_name, model_dir, dataset_dir, device=device)
+    # Choose evaluation function based on model type
+    if model_name.lower() == 'zoneawareregressor':
+        y_pred, y_true, _ = evaluate_regressor(model, test_loader, device=device)
+    elif model_name.lower() == 'zoneawaretwostage' or model_name.lower() == 'zoneawaretwostage_joint':
+        y_pred, y_true, _ = evaluate_two_stage(model, test_loader, device=device)
+    else:
+        y_pred, y_true = evaluate_cnn(model, test_loader, device=device)
+    metrics = compute_metrics(y_pred, y_true, labels_mean, labels_std)
     results[model_name] = metrics
 
 # Affichage MAE

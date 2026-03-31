@@ -316,8 +316,8 @@ def compute_direction_zones_split_opposite_sign(vectors, nv_axes=nv_axes()):
     - Split by the sign of that dominant-by-|p| projection (>=0 vs <0)
 
     Returns:
-        zones48: ndarray of shape (...,) with integer zone indices in [0, 47]
-                Zone color can be grouped back into 24 colors via (zones48 // 2).
+        zones: ndarray of shape (...,) with integer zone indices in [0, 47]
+                Zone color can be grouped back into 24 colors via (zones // 2).
     """
     v = np.asarray(vectors, dtype=np.float64)
     if v.shape[-1] != 3:
@@ -547,8 +547,53 @@ def visualize_sphere_zones_surface(n_theta=100, n_phi=100, split_opposite_sign=T
     plt.show()
 
 
+def visualize_zone_sample_counts_heatmap(dataset_dir):
+    """
+    Visualize the number of samples per zone in a dataset as a heatmap.
+    Uses compute_direction_zones_split_opposite_sign for zone assignment.
+    """
+    # Load metadata
+    metadata_path = os.path.join(dataset_dir, 'metadata.csv')
+    if not os.path.exists(metadata_path):
+        raise FileNotFoundError(f"metadata.csv not found in {dataset_dir}")
+    metadata = pd.read_csv(metadata_path)
+    if not {'Ax', 'Ay', 'Az'}.issubset(metadata.columns):
+        raise ValueError("metadata.csv must contain Ax, Ay, Az columns")
+    # Denormalize labels
+    norm_stats = load_normalization_stats(dataset_dir)
+    labels_mean = norm_stats["labels_mean"]
+    labels_std = norm_stats["labels_std"]
+    labels_norm = metadata[['Ax', 'Ay', 'Az']].values.astype(np.float32)
+    labels_denorm = denormalize_labels(labels_norm, labels_mean, labels_std)
+    # Compute zones
+    zones = compute_direction_zones_split_opposite_sign(labels_denorm)
+    # Count samples per zone
+    n_zones = 48
+    zone_counts = np.zeros(n_zones, dtype=int)
+    for z in zones:
+        zone_counts[z] += 1
+    # Reshape for heatmap (6 rows x 8 columns for easier visualization)
+    heatmap = zone_counts.reshape(6, 8)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    im = ax.imshow(heatmap, cmap='viridis', aspect='auto')
+    ax.set_title('Sample Counts per Zone (6x8 grid)')
+    ax.set_xlabel('Octant (0-7)')
+    ax.set_ylabel('Permutation (0-5)')
+    # Annotate counts
+    for i in range(6):
+        for j in range(8):
+            ax.text(j, i, heatmap[i, j], ha='center', va='center', color='white' if heatmap[i, j] > heatmap.max()/2 else 'black')
+    fig.colorbar(im, ax=ax, label='Sample Count')
+    plt.tight_layout()
+    plt.show()
+    print("Zone sample counts:")
+    for z in range(n_zones):
+        print(f"Zone {z}: {zone_counts[z]} samples")
+
+
 if __name__ =="__main__":
-    visualize_dataset_direction_zones(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
-    visualize_zone_vectors_for_dataset(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
-    visualize_vectors_on_sphere(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
-    visualize_sphere_zones_surface()
+    visualize_zone_sample_counts_heatmap(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
+    # visualize_dataset_direction_zones(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
+    # visualize_zone_vectors_for_dataset(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
+    # visualize_vectors_on_sphere(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
+    # visualize_sphere_zones_surface()

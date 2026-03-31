@@ -103,32 +103,34 @@ class ODMR_CNN_Deep(nn.Module):
         super().__init__()
         self.conv_layers = nn.Sequential(
             nn.Conv1d(n_channels, 32, kernel_size=5, padding=2),
-            nn.ReLU(),
-            nn.BatchNorm1d(32),
-            
-            nn.Conv1d(32, 64, kernel_size=5, padding=2),
-            nn.ReLU(),
-            nn.BatchNorm1d(64),
-            nn.MaxPool1d(2),  # reduce freq dim
-            
-            nn.Conv1d(64, 128, kernel_size=5, padding=2),
-            nn.ReLU(),
-            nn.BatchNorm1d(128),
-            nn.MaxPool1d(2),
+            nn.ReLU(),                                             # 1
+            nn.BatchNorm1d(32),                                    # 2
+
+            nn.Conv1d(32, 64, kernel_size=5, padding=2),           # 3
+            nn.ReLU(),                                             # 4
+            nn.BatchNorm1d(64),                                    # 5
+            nn.MaxPool1d(2),                                      # 6
+
+            nn.Conv1d(64, 128, kernel_size=5, padding=2),          # 7
+            nn.ReLU(),                                             # 8
+            nn.BatchNorm1d(128),                                   # 9
+            nn.MaxPool1d(2),                                      # 10
+
+            nn.Conv1d(128, 256, kernel_size=3, padding=1),         # 11
+            nn.BatchNorm1d(256),                                   # 12
+            nn.ReLU(),                                             # 13
+            nn.AdaptiveAvgPool1d(1),                              # 14
         )
-        
-        # Compute flattened size after pooling
-        pooled_freq = n_freq // 4
         self.fc = nn.Sequential(
-            nn.Linear(128 * pooled_freq, 256),
+            nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Linear(256, output_dim)
+            nn.Linear(128, output_dim)
         )
-        
+
     def forward(self, x):
         # x shape: (batch, channels=10, freq=201)
         x = self.conv_layers(x)
-        x = x.flatten(start_dim=1)
+        x = x.squeeze(-1)
         x = self.fc(x)
         return x
 
@@ -314,7 +316,7 @@ class ZoneClassifier(nn.Module):
     Classifier that predicts a discrete direction zone index from multi-config ODMR signals.
     Expects input shape (batch, 10, 201) and outputs logits over n_zones classes.
     """
-    def __init__(self, n_channels=10, n_freq=201, n_zones=48, dropout_rate=0.1):
+    def __init__(self, n_channels=10, n_freq=201, n_zones=48, dropout_rate=0.4):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv1d(n_channels, 64, kernel_size=5, padding=2),
@@ -385,7 +387,7 @@ class ZoneAwareRegressor(nn.Module):
             nn.Dropout(dropout_rate),
             nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Dropout(min(dropout_rate, 0.2)),
+            nn.Dropout(min(dropout_rate, 0.4)),
             nn.Linear(128, output_dim),
         )
 

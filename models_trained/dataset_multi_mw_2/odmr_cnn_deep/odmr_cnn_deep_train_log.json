@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-03-11 15:54:03",
+  "timestamp": "2026-03-30 15:19:26",
   "model_name": "ODMR_CNN_Deep",
-  "model_structure": "ODMR_CNN_Deep(\n  (conv_layers): Sequential(\n    (0): Conv1d(10, 32, kernel_size=(5,), stride=(1,), padding=(2,))\n    (1): ReLU()\n    (2): BatchNorm1d(32, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)\n    (3): Conv1d(32, 64, kernel_size=(5,), stride=(1,), padding=(2,))\n    (4): ReLU()\n    (5): BatchNorm1d(64, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)\n    (6): MaxPool1d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)\n    (7): Conv1d(64, 128, kernel_size=(5,), stride=(1,), padding=(2,))\n    (8): ReLU()\n    (9): BatchNorm1d(128, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)\n    (10): MaxPool1d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)\n    (11): Conv1d(128, 256, kernel_size=(3,), stride=(1,), padding=(1,))\n    (12): ReLU()\n    (13): BatchNorm1d(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)\n    (14): MaxPool1d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)\n  )\n  (fc): Sequential(\n    (0): Linear(in_features=6400, out_features=256, bias=True)\n    (1): ReLU()\n    (2): Linear(in_features=256, out_features=3, bias=True)\n  )\n)",
+  "model_structure": "ODMR_CNN_Deep(\n  (conv_layers): Sequential(\n    (0): Conv1d(10, 32, kernel_size=(5,), stride=(1,), padding=(2,))\n    (1): ReLU()\n    (2): BatchNorm1d(32, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)\n    (3): Conv1d(32, 64, kernel_size=(5,), stride=(1,), padding=(2,))\n    (4): ReLU()\n    (5): BatchNorm1d(64, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)\n    (6): MaxPool1d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)\n    (7): Conv1d(64, 128, kernel_size=(5,), stride=(1,), padding=(2,))\n    (8): ReLU()\n    (9): BatchNorm1d(128, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)\n    (10): MaxPool1d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)\n    (11): Conv1d(128, 256, kernel_size=(3,), stride=(1,), padding=(1,))\n    (12): BatchNorm1d(256, eps=1e-05, momentum=0.1, affine=True, track_running_stats=True)\n    (13): ReLU()\n    (14): AdaptiveAvgPool1d(output_size=1)\n  )\n  (fc): Sequential(\n    (0): Linear(in_features=256, out_features=128, bias=True)\n    (1): ReLU()\n    (2): Linear(in_features=128, out_features=3, bias=True)\n  )\n)",
   "config": {
     "batch_size": 32,
     "epochs": 200,
@@ -15,15 +15,14 @@
     "physic_informed": true,
     "physics_loss_weight": 0.1
   },
-  "val_loss": 0.133,
-  "train_loss": 0.004,
+  "val_loss": 0.107,
+  "train_loss": 0.029,
   "metrics": {
     "mae": [
-      0.0169,
-      0.2706,
-      0.1787
+      0.0214,
+      0.2517,
+      0.1576
     ],
-    "physics_loss": 0.0,
-    "mae_cartesian": null
+    "physics_loss": 0.0
   }
 }
