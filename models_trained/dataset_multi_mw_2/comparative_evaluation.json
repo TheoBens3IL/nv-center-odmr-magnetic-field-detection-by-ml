@@ -1,37 +1,37 @@
 {
   "ODMR_CNN": {
     "Ax": {
-      "MAE": 0.024,
-      "RMSE": 0.031,
-      "NMAE_mean": 12.957,
-      "NMAE_std": 10.879,
-      "NMAE_range": 2.651,
-      "NRMSE_mean": 16.675,
-      "NRMSE_std": 14.001,
-      "NRMSE_range": 3.411,
-      "R\u00b2": 0.98
+      "MAE": 0.022,
+      "RMSE": 0.029,
+      "NMAE_mean": 11.972,
+      "NMAE_std": 10.052,
+      "NMAE_range": 2.449,
+      "NRMSE_mean": 15.608,
+      "NRMSE_std": 13.105,
+      "NRMSE_range": 3.193,
+      "R\u00b2": 0.983
     },
     "Ay": {
-      "MAE": 0.135,
-      "RMSE": 0.25,
-      "NMAE_mean": 21.561,
-      "NMAE_std": 18.442,
-      "NMAE_range": 4.665,
-      "NRMSE_mean": 39.794,
-      "NRMSE_std": 34.036,
-      "NRMSE_range": 8.609,
-      "R\u00b2": 0.884
+      "MAE": 0.113,
+      "RMSE": 0.223,
+      "NMAE_mean": 18.066,
+      "NMAE_std": 15.452,
+      "NMAE_range": 3.908,
+      "NRMSE_mean": 35.54,
+      "NRMSE_std": 30.398,
+      "NRMSE_range": 7.689,
+      "R\u00b2": 0.908
     },
     "Az": {
-      "MAE": 0.087,
-      "RMSE": 0.147,
-      "NMAE_mean": 14.114,
-      "NMAE_std": 11.758,
-      "NMAE_range": 2.989,
-      "NRMSE_mean": 23.884,
-      "NRMSE_std": 19.897,
-      "NRMSE_range": 5.059,
-      "R\u00b2": 0.96
+      "MAE": 0.071,
+      "RMSE": 0.131,
+      "NMAE_mean": 11.512,
+      "NMAE_std": 9.59,
+      "NMAE_range": 2.438,
+      "NRMSE_mean": 21.286,
+      "NRMSE_std": 17.733,
+      "NRMSE_range": 4.509,
+      "R\u00b2": 0.969
     }
   },
   "ODMR_CNN_Compact": {

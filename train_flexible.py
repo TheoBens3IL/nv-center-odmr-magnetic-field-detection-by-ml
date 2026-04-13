@@ -21,14 +21,14 @@ Usage:
 import os
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from pathlib import Path
 import matplotlib.pyplot as plt
 import argparse
 import numpy as np
 from dataset import train_val_test_split
-from utils import load_normalization_stats, denormalize_labels
-from models import FrequencyAttention
+from utils import EarlyStopping, load_normalization_stats, denormalize_labels
+from models import ODMR_CNN
 
 
 class FlexibleODMRDataset:
@@ -60,7 +60,7 @@ class FlexibleODMRDataset:
         return signals, labels
 
 
-def train_flexible(batch_size=32, epochs=200, lr=1e-3, weight_decay=1e-4,
+def train_flexible(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4,
                    dataset_dir="dataset_multi_mw_2", patience=20,
                    target_components=['Ax', 'Ay', 'Az'], num_mw_configs=10):
     """
@@ -93,9 +93,7 @@ def train_flexible(batch_size=32, epochs=200, lr=1e-3, weight_decay=1e-4,
     print()
     
     # Load base dataset
-    train_set_base, val_set_base, test_set_base = train_val_test_split(
-        dataset_dir, multi_config=True
-    )
+    train_set_base, val_set_base, test_set_base = train_val_test_split(dataset_dir)
     
     # Wrap with flexible dataset
     train_set = FlexibleODMRDataset(train_set_base, num_mw_configs, target_indices)
@@ -123,14 +121,14 @@ def train_flexible(batch_size=32, epochs=200, lr=1e-3, weight_decay=1e-4,
     print()
     
     # Create model
-    model = FrequencyAttention(
+    model = ODMR_CNN(
         n_channels=num_mw_configs,
         n_freq=201,
         output_dim=output_dim
     ).to(DEVICE)
     
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"Model: FrequencyAttention")
+    print(f"Model: ODMR_CNN")
     print(f"Parameters: {total_params:,}")
     print()
     
@@ -142,23 +140,6 @@ def train_flexible(batch_size=32, epochs=200, lr=1e-3, weight_decay=1e-4,
     )
     
     # Early stopping
-    class EarlyStopping:
-        def __init__(self, patience=5, min_delta=0.0):
-            self.patience = patience
-            self.min_delta = min_delta
-            self.best_loss = float('inf')
-            self.counter = 0
-            self.best_state = None
-        
-        def step(self, val_loss, model):
-            if val_loss < self.best_loss - self.min_delta:
-                self.best_loss = val_loss
-                self.counter = 0
-                self.best_state = model.state_dict()
-            else:
-                self.counter += 1
-            return self.counter >= self.patience
-    
     early_stopping = EarlyStopping(patience=patience, min_delta=1e-6)
     
     # Training history

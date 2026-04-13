@@ -2,8 +2,6 @@ import torch
 import numpy as np
 from scipy.signal import find_peaks
 from scipy.optimize import curve_fit
-import glob
-import matplotlib.pyplot as plt
 
 
 def spin_operators(device, dtype=torch.complex64):

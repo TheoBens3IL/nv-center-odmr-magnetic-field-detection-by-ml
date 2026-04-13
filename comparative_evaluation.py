@@ -3,15 +3,10 @@ import json
 import torch
 from evaluate import load_model, get_test_loader, evaluate_cnn, evaluate_regressor, evaluate_two_stage, compute_metrics
 
-# Dossier racine des modèles
 MODELS_ROOT = "models_trained"
-# Dataset à comparer
 DATASET = "dataset_multi_mw_2"
-# Liste des modèles à comparer
 MODEL_NAMES = ["ODMR_CNN", "ODMR_CNN_Compact", "ODMR_CNN_Deep", "FrequencyAttention", "MWConfig_CNN", "HybridODMRPredictor"]
 
-
-# Résultats
 results = {}
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -34,7 +29,7 @@ for model_name in MODEL_NAMES:
     metrics = compute_metrics(y_pred, y_true, labels_mean, labels_std)
     results[model_name] = metrics
 
-# Affichage MAE
+# Print comparative results by MAE for Ax, Ay, Az and their mean
 print("\n====================== COMPARAISON DES MAE (A) =====================")
 header = ["Model", "MAE_Ax", "MAE_Ay", "MAE_Az", "MAE_Mean"]
 print("| {:<20} | {:>8} | {:>8} | {:>8} | {:>8} |".format(*header))
@@ -50,12 +45,13 @@ for model_name, metrics in results.items():
     except Exception as e:
         print(f"[WARN] Could not extract MAE for {model_name}: {e}")
         continue
-# Tri par MAE moyen croissant
+
+# Sort by MAE_Mean
 mae_table.sort(key=lambda x: x[4])
 for row in mae_table:
-    print("| {:<20} | {:>8.3f} | {:>8.3f} | {:>8.3f} | {:>8.4f} |".format(*row))
+    print("| {:<20} | {:>8.3f} | {:>8.3f} | {:>8.3f} | {:>8.3f} |".format(*row))
 
-# Sauvegarde des résultats bruts
+# Save results to JSON
 output_path = os.path.join(MODELS_ROOT, DATASET, "comparative_evaluation.json")
 with open(output_path, 'w') as f:
     json.dump(results, f, indent=2)

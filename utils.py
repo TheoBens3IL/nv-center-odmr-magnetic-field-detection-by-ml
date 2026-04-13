@@ -11,6 +11,28 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
 
+class EarlyStopping:
+    '''
+    Early stopping to halt training when validation loss doesn't improve after a set number (patience) of epochs.
+    If no improvement after 'patience' epochs, training stops.
+    '''
+    def __init__(self, patience=5, min_delta=0.0):
+        self.patience = patience       # epochs to wait for improvement
+        self.min_delta = min_delta     # minimum change to qualify as improvement
+        self.best_loss = float('inf')  # best validation loss observed
+        self.counter = 0               # epochs since last improvement
+        self.best_state = None         # best model state
+
+    def step(self, val_loss, model):
+        if val_loss < self.best_loss - self.min_delta: # improvement observed
+            self.best_loss = val_loss                  # update best loss
+            self.counter = 0                           # reset counter
+            self.best_state = model.state_dict()       # save best model state
+        else:
+            self.counter += 1                          # if no improvement, increment counter
+        return self.counter >= self.patience           # return True if early stopping criterion met
+
+
 def load_normalization_stats(dataset_dir):
     """
     Load label normalization statistics from dataset.
@@ -18,7 +40,7 @@ def load_normalization_stats(dataset_dir):
     Parameters:
         dataset_dir : str or Path
             Path to dataset directory
-            
+             
     Returns:
         dict with keys 'labels_mean' and 'labels_std'
     """
@@ -52,28 +74,6 @@ def denormalize_labels(labels_norm, labels_mean, labels_std):
     else:
         return labels_norm * labels_std + labels_mean
 
-
-def normalize_labels(labels, labels_mean, labels_std):
-    """
-    Normalize labels to zero mean and unit variance.
-    
-    Parameters:
-        labels : array or tensor (N, 3)
-            Original labels (Ax, Ay, Az)
-        labels_mean : array (3,)
-            Mean to use for normalization
-        labels_std : array (3,)
-            Std to use for normalization
-            
-    Returns:
-        Normalized labels
-    """
-    if isinstance(labels, torch.Tensor):
-        labels_mean = torch.tensor(labels_mean, device=labels.device, dtype=labels.dtype)
-        labels_std = torch.tensor(labels_std, device=labels.device, dtype=labels.dtype)
-        return (labels - labels_mean) / (labels_std + 1e-8)
-    else:
-        return (labels - labels_mean) / (labels_std + 1e-8)
 
 
 def plot_training_history(history, label_names=['Ax', 'Ay', 'Az'], show=True):

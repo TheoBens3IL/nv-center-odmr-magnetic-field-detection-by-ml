@@ -7,7 +7,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from dataset import train_val_test_split, print_dataset_statistics, get_data_loaders, get_frequency_axis
-from utils import load_normalization_stats, denormalize_labels, plot_training_history
+from utils import EarlyStopping, load_normalization_stats, denormalize_labels, plot_training_history
 from physics_informed import extract_odmr_peak_frequencies, physics_loss
 import models
 
@@ -23,28 +23,6 @@ class WeightedMSELoss(nn.Module):
             raise ValueError(f"Weights shape {self.weights.shape} does not match prediction shape {pred.shape}")
         loss = ((pred - target) ** 2) * self.weights
         return loss.mean()
-
-
-class EarlyStopping:
-    '''
-    Early stopping to halt training when validation loss doesn't improve after a set number (patience) of epochs.
-    If no improvement after 'patience' epochs, training stops.
-    '''
-    def __init__(self, patience=5, min_delta=0.0):
-        self.patience = patience       # epochs to wait for improvement
-        self.min_delta = min_delta     # minimum change to qualify as improvement
-        self.best_loss = float('inf')  # best validation loss observed
-        self.counter = 0               # epochs since last improvement
-        self.best_state = None         # best model state
-
-    def step(self, val_loss, model):
-        if val_loss < self.best_loss - self.min_delta: # improvement observed
-            self.best_loss = val_loss                  # update best loss
-            self.counter = 0                           # reset counter
-            self.best_state = model.state_dict()       # save best model state
-        else:
-            self.counter += 1                          # if no improvement, increment counter
-        return self.counter >= self.patience           # return True if early stopping criterion met  
 
 
 def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="dataset_multi_mw", patience=20, min_delta=1e-6, model_name="FrequencyAttention", loss_weights=None, use_attention=False, physics_loss_weight=0.1, show_dataset_stats=False):

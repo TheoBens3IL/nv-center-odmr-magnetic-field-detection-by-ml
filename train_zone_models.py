@@ -5,7 +5,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from dataset import stratified_zone_split
-from utils import denormalize_labels, compute_zones_for_dataset
+from utils import EarlyStopping, denormalize_labels, compute_zones_for_dataset
 import models
 
 # Wrapper to add zone indices to the base dataset splits (Subset[ODMRDatasetMultiConfig]) for zone-aware training 
@@ -28,24 +28,6 @@ class ZoneSubset(Dataset):
             return signals, labels, zone_tensor
         else:
             return signals, zone_tensor
-
-
-class EarlyStopping:
-    def __init__(self, patience=5, min_delta=0.0):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.best_loss = float("inf")
-        self.counter = 0
-        self.best_state = None
-
-    def step(self, val_loss, model_):
-        if val_loss < self.best_loss - self.min_delta:
-            self.best_loss = val_loss
-            self.counter = 0
-            self.best_state = model_.state_dict()
-        else:
-            self.counter += 1
-        return self.counter >= self.patience
 
 
 def train_classifier(dataset_dir, batch_size, epochs, lr, weight_decay, patience):
