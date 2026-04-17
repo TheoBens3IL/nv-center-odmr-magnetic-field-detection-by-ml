@@ -16,8 +16,10 @@ freq_list = np.linspace(Wstart, Wend, Wnr)
 output_dir = "datasets_synthetic/synthetic_multi_mw_2"
 os.makedirs(output_dir, exist_ok=True)
 
+
 # --- Load labels (Ax, Ay, Az) from real dataset ---
-meta_path = "datasets_pytorch/dataset_multi_mw_2/metadata.csv"
+meta_path = os.path.join(os.path.dirname(__file__), "..", "datasets_pytorch", "dataset_multi_mw_2", "metadata.csv")
+meta_path = os.path.normpath(meta_path)
 meta = pd.read_csv(meta_path)
 
 
