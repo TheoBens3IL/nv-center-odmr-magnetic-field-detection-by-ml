@@ -157,19 +157,22 @@ def compute_metrics(y_pred, y_true, labels_mean, labels_std):
     return results
 
 
-def plot_test_precision(y_pred, y_true, labels_mean, labels_std, save_path=None):
+def plot_test_precision(y_pred, y_true, labels_mean, labels_std, model_name=None, save_path=None):
     """
     Visualize test prediction precision: histograms and scatter plots of errors per axis.
     """
-    import matplotlib.pyplot as plt
     y_pred_denorm = denormalize_labels(y_pred, labels_mean, labels_std).numpy()
     y_true_denorm = denormalize_labels(y_true, labels_mean, labels_std).numpy()
     label_names = ['Ax', 'Ay', 'Az']
     units = ['A', 'A', 'A']
     errors = y_pred_denorm - y_true_denorm
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    fig.suptitle('Test Prediction Precision', fontsize=16, fontweight='bold')
+    fig, axes = plt.subplots(2, 3, figsize=(19.5, 11), gridspec_kw={'hspace': 0.4, 'top': 0.87})
+    fig.suptitle('Prediction Precision (on test_set)', fontsize=14, fontweight='bold', y=0.98)
+
+    if model_name:
+        fig.text(0.5, 0.93, f'Model: {model_name}', ha='center', fontsize=12, fontweight='bold')
+
     for i, name in enumerate(label_names):
         # Histogram of errors
         ax = axes[0, i]
@@ -189,7 +192,6 @@ def plot_test_precision(y_pred, y_true, labels_mean, labels_std, save_path=None)
         ax.set_ylabel('Predicted Value')
         ax.grid(True, alpha=0.3)
 
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
     if save_path:
         fig.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"Test precision plot saved to {save_path}")
@@ -278,7 +280,7 @@ def main():
         y_pred, y_true = evaluate_cnn(model, test_loader, device=device)
     
     compute_metrics(y_pred, y_true, labels_mean, labels_std)
-    plot_test_precision(y_pred, y_true, labels_mean, labels_std)
+    plot_test_precision(y_pred, y_true, labels_mean, labels_std, model_name=model_name)
 
 
 if __name__ == '__main__':

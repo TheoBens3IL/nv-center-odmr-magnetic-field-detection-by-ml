@@ -547,6 +547,89 @@ def visualize_sphere_zones_surface(n_theta=100, n_phi=100, split_opposite_sign=T
     plt.show()
 
 
+def visualize_zone_sample_counts_on_sphere(dataset_dir, n_theta=100, n_phi=100, split_opposite_sign=True):
+    """
+    Visualize the number of samples per zone as a 3D sphere heatmap.
+    Each zone on the sphere surface is colored by the number of samples in that zone.
+    """
+    # Load metadata
+    metadata_path = os.path.join(dataset_dir, 'metadata.csv')
+    if not os.path.exists(metadata_path):
+        raise FileNotFoundError(f"metadata.csv not found in {dataset_dir}")
+    metadata = pd.read_csv(metadata_path)
+    if not {'Ax', 'Ay', 'Az'}.issubset(metadata.columns):
+        raise ValueError("metadata.csv must contain Ax, Ay, Az columns")
+
+    # Denormalize labels
+    norm_stats = load_normalization_stats(dataset_dir)
+    labels_mean = norm_stats["labels_mean"]
+    labels_std = norm_stats["labels_std"]
+    labels_norm = metadata[['Ax', 'Ay', 'Az']].values.astype(np.float32)
+    labels_denorm = denormalize_labels(labels_norm, labels_mean, labels_std)
+
+    # Compute zones for dataset
+    dataset_zones = compute_direction_zones_split_opposite_sign(labels_denorm)
+
+    # Count samples per zone
+    n_zones = 48 if split_opposite_sign else 24
+    zone_counts = np.zeros(n_zones, dtype=int)
+    for z in dataset_zones:
+        zone_counts[z] += 1
+
+    # Create a meshgrid on the sphere
+    theta = np.linspace(0, np.pi, n_theta)
+    phi = np.linspace(0, 2 * np.pi, n_phi)
+    Theta, Phi = np.meshgrid(theta, phi)
+
+    # Convert to cartesian coordinates
+    X = np.sin(Theta) * np.cos(Phi)
+    Y = np.sin(Theta) * np.sin(Phi)
+    Z = np.cos(Theta)
+
+    # Flatten for zone computation
+    directions = np.stack([X.flatten(), Y.flatten(), Z.flatten()], axis=1)
+    if split_opposite_sign:
+        zones_grid = compute_direction_zones_split_opposite_sign(directions)
+    else:
+        zones_grid = compute_direction_zones(directions)
+
+    # Reshape zones to grid
+    zones_grid = zones_grid.reshape(Phi.shape)
+
+    # Create sample count grid
+    sample_count_grid = np.zeros_like(zones_grid, dtype=float)
+    for i in range(zones_grid.shape[0]):
+        for j in range(zones_grid.shape[1]):
+            zone_idx = zones_grid[i, j]
+            sample_count_grid[i, j] = zone_counts[int(zone_idx)]
+
+    # Plot
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Create colormap
+    cmap = plt.get_cmap('viridis')
+    norm = plt.Normalize(sample_count_grid.min(), sample_count_grid.max())
+    facecolors = cmap(norm(sample_count_grid))
+
+    ax.plot_surface(X, Y, Z, facecolors=facecolors, rstride=1, cstride=1, linewidth=0, antialiased=False, shade=False)
+    ax.set_title('Sample Counts per Zone (on Sphere)', fontsize=14, fontweight='bold')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+
+    # Add colorbar
+    mappable = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    mappable.set_array(sample_count_grid)
+    fig.colorbar(mappable, ax=ax, label='Sample Count')
+
+    plt.show()
+
+    print("Zone sample counts:")
+    for z in range(n_zones):
+        print(f"Zone {z}: {zone_counts[z]} samples")
+
+
 def visualize_zone_sample_counts_heatmap(dataset_dir):
     """
     Visualize the number of samples per zone in a dataset as a heatmap.
@@ -592,7 +675,8 @@ def visualize_zone_sample_counts_heatmap(dataset_dir):
 
 
 if __name__ =="__main__":
-    visualize_zone_sample_counts_heatmap(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
+    visualize_zone_sample_counts_on_sphere(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
+    # visualize_zone_sample_counts_heatmap(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
     # visualize_dataset_direction_zones(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
     # visualize_zone_vectors_for_dataset(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
     # visualize_vectors_on_sphere(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
