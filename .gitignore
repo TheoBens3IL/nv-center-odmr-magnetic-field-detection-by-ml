@@ -5,3 +5,8 @@ datasets_raw/
 
 NV_ordeing_by_projection_10.csv
 ESRpeakOrderPlotterv2.py
+
+datasets_synthetic/
+datasets_pytorch/synthetic*
+synthetical_data/fluorescence_over_phase/
+synthetical_data/tilt_scan_heatmap/

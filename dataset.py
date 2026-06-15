@@ -53,7 +53,37 @@ class ODMRDatasetMultiConfig(Dataset):
         return spectrum, label
 
 
-def train_val_test_split(dataset_dir, val_size=0.15, test_size=0.15, random_state=1):
+# New: Dataset for synthetic data (5 MW configs, 400 freq)
+class ODMRDatasetSynthetic(Dataset):
+    """
+    PyTorch Dataset for synthetic ODMR signals (5 MW configs, 400 freq).
+    Each item:
+        X : Tensor (5, 400)
+        y : Tensor (3,)
+    """
+    def __init__(self, dataset_dir, transform=None):
+        self.dataset_dir = os.path.abspath(dataset_dir)
+        self.signals_dir = os.path.join(self.dataset_dir, "signals")
+        self.metadata = pd.read_csv(os.path.join(self.dataset_dir, "metadata.csv"))
+        self.transform = transform
+        if 'Ax' in self.metadata.columns:
+            self.label_cols = ['Ax', 'Ay', 'Az']
+        else:
+            raise ValueError("Could not find label columns (Ax/Ay/Az) in metadata.csv")
+
+    def __len__(self):
+        return len(self.metadata)
+
+    def __getitem__(self, idx):
+        row = self.metadata.iloc[idx]
+        config_id = int(row["experiment_id"])
+        signals = np.load(os.path.join(self.signals_dir, f"config_{config_id:04d}.npy"))  # (5, 400)
+        spectrum = torch.from_numpy(signals).float()  # (5, 400)
+        label = torch.tensor([row[self.label_cols[0]], row[self.label_cols[1]], row[self.label_cols[2]]], dtype=torch.float32)
+        return spectrum, label
+
+
+def train_val_test_split(dataset_dir, val_size=0.15, test_size=0.15, random_state=1, synthetic=False):
     """
     Split the dataset by experiment_ids into train, val, and test sets.
     
@@ -73,7 +103,10 @@ def train_val_test_split(dataset_dir, val_size=0.15, test_size=0.15, random_stat
     val_set   = set(val_ids)
     test_set  = set(test_ids)
 
-    full_dataset = ODMRDatasetMultiConfig(dataset_dir)
+    if synthetic:
+        full_dataset = ODMRDatasetSynthetic(dataset_dir)
+    else:
+        full_dataset = ODMRDatasetMultiConfig(dataset_dir)
 
     train_idx = [i for i, row in metadata.iterrows() if row["experiment_id"] in train_set]
     val_idx   = [i for i, row in metadata.iterrows() if row["experiment_id"] in val_set]
@@ -86,7 +119,7 @@ def train_val_test_split(dataset_dir, val_size=0.15, test_size=0.15, random_stat
     )
 
 
-def stratified_zone_split(dataset_dir, val_size=0.15, test_size=0.15, random_state=1):
+def stratified_zone_split(dataset_dir, val_size=0.15, test_size=0.15, random_state=1, synthetic=False):
     """
     Split the dataset by zone indices into train, val, and test sets, ensuring each split contains at least one sample from each zone (if possible) and homogeneous repartition.
     Args:
@@ -97,7 +130,10 @@ def stratified_zone_split(dataset_dir, val_size=0.15, test_size=0.15, random_sta
     Returns:
         train_subset, val_subset, test_subset
     """
-    full_dataset = ODMRDatasetMultiConfig(dataset_dir)
+    if synthetic:
+        full_dataset = ODMRDatasetSynthetic(dataset_dir)
+    else:
+        full_dataset = ODMRDatasetMultiConfig(dataset_dir)
     
     # Compute zones for all samples
     zones, _, _ = compute_zones_for_dataset(dataset_dir)

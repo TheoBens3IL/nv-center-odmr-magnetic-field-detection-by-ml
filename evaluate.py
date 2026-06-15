@@ -7,24 +7,39 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from train_zone_models import ZoneSubset
 from utils import load_normalization_stats, denormalize_labels, compute_zones_for_dataset
-from dataset import train_val_test_split
+from dataset import train_val_test_split, infer_synthetic_signal_shape
 from sklearn.metrics import r2_score
 import matplotlib.pyplot as plt
 
 
+def _canonical_model_name(name: str) -> str:
+    """Mappe un nom CLI (souvent minuscules) vers la clé exacte dans models.available_models()."""
+    avail = models.available_models()
+    if name in avail:
+        return name
+    by_lower = {k.lower(): k for k in avail}
+    return by_lower.get(name.lower(), name)
+
+
 def load_model(model_name, model_dir, dataset_dir, device='cpu'):
+    model_name = _canonical_model_name(model_name)
     model_class = models.__dict__[model_name]
+    # Même logique que train_zone_models: taille (n_mw, n_freq) lue depuis les .npy si possible
+    try:
+        n_channels, n_freq = infer_synthetic_signal_shape(dataset_dir)
+    except (FileNotFoundError, ValueError):
+        n_channels, n_freq = 10, 201
 
     if model_name == 'HybridODMRPredictor':
-        model = model_class(n_channels=10, n_freq=201, use_attention=False)
+        model = model_class(n_channels=n_channels, n_freq=n_freq, use_attention=False)
     elif model_name == 'ZoneClassifier':
         n_zones = compute_zones_for_dataset(dataset_dir)[0].max() + 1
-        model = model_class(n_channels=10, n_freq=201, n_zones=n_zones)
-    elif model_name == 'ZoneAwareRegressor' or model_name == 'ZoneAwareTwoStage' or model_name == 'ZoneAwareTwoStage_joint':
+        model = model_class(n_channels=n_channels, n_freq=n_freq, n_zones=n_zones)
+    elif model_name == 'ZoneAwareRegressor' or model_name == 'ZoneAwareTwoStage':
         n_zones = compute_zones_for_dataset(dataset_dir)[0].max() + 1
-        model = model_class(n_channels=10, n_freq=201, n_zones=n_zones, zone_emb_dim=32, output_dim=3)
+        model = model_class(n_channels=n_channels, n_freq=n_freq, n_zones=n_zones, zone_emb_dim=32, output_dim=3)
     else:  # standard CNN regressor
-        model = model_class(n_channels=10, n_freq=201, output_dim=3)
+        model = model_class(n_channels=n_channels, n_freq=n_freq, output_dim=3)
 
     if model_name == 'ZoneAwareTwoStage' and 'zoneawaretwostage_joint' in str(model_dir):
         state_path = Path(model_dir) / "zoneawaretwostage_joint_best_model.pth"
@@ -258,7 +273,7 @@ def main():
         model_name = 'ZoneAwareTwoStage'
     else:
         model_dir = Path("models_trained") / Path(args.dataset_dir) / args.model.lower()
-        model_name = args.model
+        model_name = _canonical_model_name(args.model)
 
     # Add 'datasets_pytorch' if necessary
     if args.dataset_dir is not None:

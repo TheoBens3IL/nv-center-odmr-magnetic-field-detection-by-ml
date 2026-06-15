@@ -35,17 +35,38 @@ def plot_raw_dataset(dataset_dir, filter_spectra=False, filter_type='gaussian', 
     
     dataset_dir = Path(dataset_dir)
     
-    # Load currents
-    currents_csv = list(dataset_dir.glob('3Dcurrents_sweep_*.csv'))[0]
-    currents_data = pd.read_csv(currents_csv, header=None)
-    Ax = currents_data.iloc[0].values
-    Ay = currents_data.iloc[1].values
-    Az = currents_data.iloc[2].values
+    # Load currents — try real-dataset CSV first, fall back to metadata.csv
+    currents_csv_list = list(dataset_dir.glob('3Dcurrents_sweep_*.csv'))
+    if currents_csv_list:
+        currents_data = pd.read_csv(currents_csv_list[0], header=None)
+        Ax = currents_data.iloc[0].values
+        Ay = currents_data.iloc[1].values
+        Az = currents_data.iloc[2].values
+    else:
+        meta_path = dataset_dir / 'metadata.csv'
+        if not meta_path.exists():
+            raise FileNotFoundError(
+                f"No '3Dcurrents_sweep_*.csv' nor 'metadata.csv' found in {dataset_dir}"
+            )
+        currents_data = pd.read_csv(meta_path)
+        Ax = currents_data['Ax'].values
+        Ay = currents_data['Ay'].values
+        Az = currents_data['Az'].values
     
-    # Get all SPLIT files
+    # Get all SPLIT files — if none exist, this is a numpy-format dataset
     split_files = sorted(dataset_dir.glob('*SPLIT*Raw.txt'))
+    if len(split_files) == 0:
+        npy_signals = sorted((dataset_dir / 'signals').glob('config_*.npy'))
+        if npy_signals and (dataset_dir / 'frequencies.npy').exists():
+            print(f"No SPLIT files found in {dataset_dir}. "
+                  f"Detected numpy-format dataset — switching to pytorch visualization.")
+            plot_pytorch_dataset(str(dataset_dir))
+            return
+        raise FileNotFoundError(
+            f"No SPLIT files nor numpy signals found in {dataset_dir}"
+        )
     num_experiments = len(split_files)
-        
+
     # Load first file to get structure
     data_first = np.loadtxt(split_files[0], delimiter='\t')
     frequencies, signals_raw, backgrounds_raw = extract_signals_and_backgrounds(data_first)
@@ -256,10 +277,15 @@ if __name__ == "__main__":
     parser.add_argument('--peak_extraction', action='store_true', help='If set in pytorch mode, run extract_odmr_peak_frequencies and overlay detected peaks as scatter')
     args = parser.parse_args()
 
-    # Resolve path based on mode
+    def resolve_dir(user_path, default_prefix):
+        if os.path.isabs(user_path) or os.path.exists(user_path):
+            return user_path
+        prefixed = os.path.join(default_prefix, user_path)
+        return prefixed
+
     if args.mode == 'raw':
-        dataset_dir = DATASET_DIR = os.path.join("datasets_raw", args.dataset_dir)
+        dataset_dir = DATASET_DIR = resolve_dir(args.dataset_dir, "datasets_raw")
         plot_raw_dataset(dataset_dir)
     else:
-        dataset_dir = os.path.join("datasets_pytorch", args.dataset_dir)
+        dataset_dir = resolve_dir(args.dataset_dir, "datasets_pytorch")
         plot_pytorch_dataset(dataset_dir, peak_extraction=args.peak_extraction)

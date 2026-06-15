@@ -193,14 +193,18 @@ def physics_loss(B_pred, measured_freqs):
         
     measured_freqs = measured_freqs / 1e9  # convert to GHz
 
-    # Keep only valid entries (non-NaN) for loss calculation
-    mask = ~torch.isnan(measured_freqs) # (batch, 8) boolean mask of valid entries
-    diff = f_pred - measured_freqs
-    diff = diff[mask]  # keep only valid entries
+    # Align with peak extraction: measured peaks are sorted by frequency, while f_pred
+    # follows (NV axis k, f_minus, f_plus). Compare sorted sequences so slot i matches
+    # the i-th smallest transition frequency (NaNs from partial detection sort to the end).
+    # keep only valid entries (non-NaN) for loss calculation
+    f_sorted = torch.sort(f_pred, dim=1).values
+    m_sorted = torch.sort(measured_freqs, dim=1).values
+    mask = ~torch.isnan(m_sorted)
+    diff = (f_sorted - m_sorted)[mask]
 
     # If no valid entries, return zero loss
     if diff.numel() == 0:
-        return torch.tensor(0.0, device=f_pred.device)
+        return torch.tensor(0.0, device=f_pred.device, dtype=f_pred.dtype)
 
     return torch.mean(diff ** 2)
 

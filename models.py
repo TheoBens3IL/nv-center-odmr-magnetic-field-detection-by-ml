@@ -10,6 +10,8 @@ class ODMR_CNN(nn.Module):
     """
     def __init__(self, n_channels=10, n_freq=201, output_dim=3):
         super().__init__()
+        self.n_channels = n_channels
+        self.n_freq = n_freq
         self.conv1 = nn.Sequential(
             nn.Conv1d(n_channels, 64, kernel_size=7, padding=3),
             nn.BatchNorm1d(64),
@@ -65,23 +67,22 @@ class ODMR_CNN(nn.Module):
 class ODMR_CNN_Compact(nn.Module):
     def __init__(self, n_channels=10, n_freq=201, output_dim=3):
         super().__init__()
+        self.n_channels = n_channels
+        self.n_freq = n_freq
         self.features = nn.Sequential(
             nn.Conv1d(n_channels, 64, kernel_size=7, padding=3),
             nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.MaxPool1d(2),
-
             nn.Conv1d(64, 128, kernel_size=5, padding=2),
             nn.BatchNorm1d(128),
             nn.ReLU(),
             nn.MaxPool1d(2),
-
             nn.Conv1d(128, 256, kernel_size=5, padding=2),
             nn.BatchNorm1d(256),
             nn.ReLU(),
             nn.AdaptiveAvgPool1d(1),
         )
-
         self.regressor = nn.Sequential(
             nn.Linear(256, 128),
             nn.ReLU(),
@@ -101,25 +102,24 @@ class ODMR_CNN_Compact(nn.Module):
 class ODMR_CNN_Deep(nn.Module):    
     def __init__(self, n_channels=10, n_freq=201, output_dim=3):
         super().__init__()
+        self.n_channels = n_channels
+        self.n_freq = n_freq
         self.conv_layers = nn.Sequential(
             nn.Conv1d(n_channels, 32, kernel_size=5, padding=2),
-            nn.ReLU(),                                             # 1
-            nn.BatchNorm1d(32),                                    # 2
-
-            nn.Conv1d(32, 64, kernel_size=5, padding=2),           # 3
-            nn.ReLU(),                                             # 4
-            nn.BatchNorm1d(64),                                    # 5
-            nn.MaxPool1d(2),                                      # 6
-
-            nn.Conv1d(64, 128, kernel_size=5, padding=2),          # 7
-            nn.ReLU(),                                             # 8
-            nn.BatchNorm1d(128),                                   # 9
-            nn.MaxPool1d(2),                                      # 10
-
-            nn.Conv1d(128, 256, kernel_size=3, padding=1),         # 11
-            nn.BatchNorm1d(256),                                   # 12
-            nn.ReLU(),                                             # 13
-            nn.AdaptiveAvgPool1d(1),                              # 14
+            nn.ReLU(),
+            nn.BatchNorm1d(32),
+            nn.Conv1d(32, 64, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.BatchNorm1d(64),
+            nn.MaxPool1d(2),
+            nn.Conv1d(64, 128, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.BatchNorm1d(128),
+            nn.MaxPool1d(2),
+            nn.Conv1d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1),
         )
         self.fc = nn.Sequential(
             nn.Linear(256, 128),
@@ -128,7 +128,6 @@ class ODMR_CNN_Deep(nn.Module):
         )
 
     def forward(self, x):
-        # x shape: (batch, channels=10, freq=201)
         x = self.conv_layers(x)
         x = x.squeeze(-1)
         x = self.fc(x)
@@ -139,33 +138,31 @@ class ODMR_CNN_Deep(nn.Module):
 class FrequencyAttention(nn.Module):
     def __init__(self, n_channels=10, n_freq=201, output_dim=3):
         super().__init__()
+        self.n_channels = n_channels
+        self.n_freq = n_freq
         self.conv = nn.Sequential(
             nn.Conv1d(n_channels, 64, kernel_size=5, padding=2),
             nn.ReLU(),
             nn.Conv1d(64, 128, kernel_size=5, padding=2),
             nn.ReLU()
         )
-        
         self.attention = nn.Sequential(
             nn.Linear(128, 128),
             nn.Tanh(),
             nn.Linear(128, 1)  # attention score per freq
         )
-        
         self.fc = nn.Sequential(
             nn.Linear(128, 64),
             nn.ReLU(),
             nn.Linear(64, output_dim)
         )
-    
+
     def forward(self, x):
-        # x: (batch, channels=10, freq=201)
+        # x: (batch, channels, freq)
         h = self.conv(x)  # (batch, 128, freq)
         h = h.transpose(1, 2)  # (batch, freq, 128)
-        
         attn_weights = torch.softmax(self.attention(h), dim=1)  # (batch, freq, 1)
         h_attn = (h * attn_weights).sum(dim=1)  # weighted sum over freq
-        
         output = self.fc(h_attn)
         return output
 
@@ -175,7 +172,8 @@ class MWConfig_CNN(nn.Module):
     """1D Conv + MW configs aggregation"""    
     def __init__(self, n_channels=10, n_freq=201, output_dim=3):
         super().__init__()
-        # Treat each MW config separately
+        self.n_channels = n_channels
+        self.n_freq = n_freq
         self.conv_mw = nn.Conv1d(1, 16, kernel_size=5, padding=2)
         self.pool = nn.AdaptiveAvgPool1d(1)  # pool freq dim
         
@@ -219,9 +217,8 @@ class HybridODMRPredictor(nn.Module):
             use_attention: Use FrequencyAttention for Ay/Az (True) or CNN (False)
         """
         super().__init__()
-        
-        # Branch 1: Linear predictor for Ax (flattened input)
-        # Input: (batch, 10*201) = (batch, 2010)
+        self.n_channels = n_channels
+        self.n_freq = n_freq
         self.linear_branch = nn.Sequential(
             nn.Linear(n_channels * n_freq, 256),
             nn.ReLU(),
@@ -230,24 +227,18 @@ class HybridODMRPredictor(nn.Module):
             nn.ReLU(),
             nn.Linear(64, 1)  # Output: Ax
         )
-        
-        # Branch 2: Non-linear predictor for Ay, Az
-        # Input: (batch, 10, 201)
         if use_attention:
-            # Use FrequencyAttention architecture
             self.nonlinear_branch = nn.Sequential(
                 nn.Conv1d(n_channels, 128, kernel_size=9, padding=4),
                 nn.BatchNorm1d(128),
                 nn.ReLU(),
-                nn.MaxPool1d(2)  # 201 -> 100
+                nn.MaxPool1d(2)
             )
-            
             self.attention = nn.Sequential(
                 nn.Linear(128, 128),
                 nn.Tanh(),
                 nn.Linear(128, 1)
             )
-            
             self.fc_nonlinear = nn.Sequential(
                 nn.Linear(128, 64),
                 nn.ReLU(),
@@ -255,19 +246,16 @@ class HybridODMRPredictor(nn.Module):
                 nn.Linear(64, 2)  # Output: Ay, Az
             )
         else:
-            # Use simple CNN
             self.nonlinear_branch = nn.Sequential(
                 nn.Conv1d(n_channels, 128, kernel_size=9, padding=4),
                 nn.BatchNorm1d(128),
                 nn.ReLU(),
-                nn.MaxPool1d(2),  # 201 -> 100
-                
+                nn.MaxPool1d(2),
                 nn.Conv1d(128, 256, kernel_size=5, padding=2),
                 nn.BatchNorm1d(256),
                 nn.ReLU(),
                 nn.AdaptiveAvgPool1d(1)
             )
-            
             self.fc_nonlinear = nn.Sequential(
                 nn.Linear(256, 128),
                 nn.ReLU(),
@@ -276,7 +264,6 @@ class HybridODMRPredictor(nn.Module):
                 nn.ReLU(),
                 nn.Linear(64, 2)  # Output: Ay, Az
             )
-        
         self.use_attention = use_attention
     
     def forward(self, x):
@@ -288,26 +275,18 @@ class HybridODMRPredictor(nn.Module):
             (batch, 3) - [Ax, Ay, Az] predictions
         """
         batch_size = x.shape[0]
-        
-        # Branch 1: Linear prediction for Ax
-        x_flat = x.view(batch_size, -1)  # (batch, 2010)
-        ax_pred = self.linear_branch(x_flat)  # (batch, 1)
-        
-        # Branch 2: Non-linear prediction for Ay, Az
-        h = self.nonlinear_branch(x)  # (batch, channels, freq)
-        
+        x_flat = x.view(batch_size, -1)
+        ax_pred = self.linear_branch(x_flat)
+        h = self.nonlinear_branch(x)
         if self.use_attention:
-            h = h.transpose(1, 2)  # (batch, freq, channels)
+            h = h.transpose(1, 2)
             attn_weights = torch.softmax(self.attention(h), dim=1)
-            h_attn = (h * attn_weights).sum(dim=1)  # (batch, channels)
-            ay_az_pred = self.fc_nonlinear(h_attn)  # (batch, 2)
+            h_attn = (h * attn_weights).sum(dim=1)
+            ay_az_pred = self.fc_nonlinear(h_attn)
         else:
-            h = h.view(batch_size, -1)  # (batch, channels)
-            ay_az_pred = self.fc_nonlinear(h)  # (batch, 2)
-        
-        # Concatenate predictions: [Ax, Ay, Az]
-        output = torch.cat([ax_pred, ay_az_pred], dim=1)  # (batch, 3)
-        
+            h = h.view(batch_size, -1)
+            ay_az_pred = self.fc_nonlinear(h)
+        output = torch.cat([ax_pred, ay_az_pred], dim=1)
         return output
 
 
@@ -318,6 +297,8 @@ class ZoneClassifier(nn.Module):
     """
     def __init__(self, n_channels=10, n_freq=201, n_zones=48, dropout_rate=0.4):
         super().__init__()
+        self.n_channels = n_channels
+        self.n_freq = n_freq
         self.conv = nn.Sequential(
             nn.Conv1d(n_channels, 64, kernel_size=5, padding=2),
             nn.BatchNorm1d(64),
@@ -361,26 +342,23 @@ class ZoneAwareRegressor(nn.Module):
     """
     def __init__(self, n_channels=10, n_freq=201, n_zones=48, zone_emb_dim=32, output_dim=3, dropout_rate=0.3):
         super().__init__()
-
+        self.n_channels = n_channels
+        self.n_freq = n_freq
         self.feature_extractor = nn.Sequential(
             nn.Conv1d(n_channels, 64, kernel_size=5, padding=2),
             nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.MaxPool1d(2),  # 201 -> 100
-
+            nn.MaxPool1d(2),
             nn.Conv1d(64, 128, kernel_size=5, padding=2),
             nn.BatchNorm1d(128),
             nn.ReLU(),
-            nn.MaxPool1d(2),  # 100 -> 50
-
+            nn.MaxPool1d(2),
             nn.Conv1d(128, 256, kernel_size=5, padding=2),
             nn.BatchNorm1d(256),
             nn.ReLU(),
-            nn.AdaptiveAvgPool1d(1),  # 50 -> 1
+            nn.AdaptiveAvgPool1d(1),
         )
-
-        self.zone_emb = nn.Embedding(n_zones, zone_emb_dim) # degrees of freedom the model has to describe how each of the 48 zones behaves differently.
-
+        self.zone_emb = nn.Embedding(n_zones, zone_emb_dim)
         self.regressor = nn.Sequential(
             nn.Linear(256 + zone_emb_dim, 256),
             nn.ReLU(),
@@ -412,6 +390,8 @@ class ZoneAwareTwoStage(nn.Module):
     """
     def __init__(self, n_channels=10, n_freq=201, n_zones=48, zone_emb_dim=32, output_dim=3, dropout_rate=0.3):
         super().__init__()
+        self.n_channels = n_channels
+        self.n_freq = n_freq
         self.classifier = ZoneClassifier(n_channels=n_channels, n_freq=n_freq, n_zones=n_zones, dropout_rate=dropout_rate)
         self.regressor = ZoneAwareRegressor(n_channels=n_channels, n_freq=n_freq, n_zones=n_zones, zone_emb_dim=zone_emb_dim, output_dim=output_dim, dropout_rate=dropout_rate)
 

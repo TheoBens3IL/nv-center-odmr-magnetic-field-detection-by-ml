@@ -30,9 +30,15 @@ class ZoneSubset(Dataset):
             return signals, zone_tensor
 
 
-def train_classifier(dataset_dir, batch_size, epochs, lr, weight_decay, patience):
+def train_classifier(dataset_dir, batch_size, epochs, lr, weight_decay, patience, synthetic=False):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dataset_path = os.path.join('datasets_pytorch', dataset_dir)
+
+    # Set input shape based on dataset type
+    if synthetic:
+        n_channels, n_freq = 5, 400
+    else:
+        n_channels, n_freq = 10, 201
 
     zones, labels_mean, labels_std = compute_zones_for_dataset(dataset_path)
     print('DEBUG zones uniques:', np.unique(zones))
@@ -52,7 +58,7 @@ def train_classifier(dataset_dir, batch_size, epochs, lr, weight_decay, patience
     print(f"Number of zones: {n_classes}")
     print("=" * 60)
 
-    train_base, val_base, test_base = stratified_zone_split(dataset_path)
+    train_base, val_base, test_base = stratified_zone_split(dataset_path, synthetic=synthetic)
 
     train_set = ZoneSubset(train_base, zones, regression=False)
     val_set = ZoneSubset(val_base, zones, regression=False)
@@ -62,7 +68,7 @@ def train_classifier(dataset_dir, batch_size, epochs, lr, weight_decay, patience
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=0)
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=0)
     
-    model = models.ZoneClassifier(n_channels=10, n_freq=201, n_zones=n_classes).to(device)
+    model = models.ZoneClassifier(n_channels=n_channels, n_freq=n_freq, n_zones=n_classes).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-6)
@@ -162,9 +168,15 @@ def train_classifier(dataset_dir, batch_size, epochs, lr, weight_decay, patience
     return model, test_acc
 
 
-def train_regressor(dataset_dir,batch_size, epochs, lr, weight_decay, patience):
+def train_regressor(dataset_dir,batch_size, epochs, lr, weight_decay, patience, synthetic=False):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dataset_path = os.path.join('datasets_pytorch', dataset_dir)
+
+    # Set input shape based on dataset type
+    if synthetic:
+        n_channels, n_freq = 5, 400
+    else:
+        n_channels, n_freq = 10, 201
 
     zones, labels_mean, labels_std = compute_zones_for_dataset(dataset_path)
     n_classes = int(zones.max() + 1)
@@ -182,7 +194,7 @@ def train_regressor(dataset_dir,batch_size, epochs, lr, weight_decay, patience):
     print(f"Number of zones: {n_classes}")
     print("=" * 60)
 
-    train_base, val_base, test_base = stratified_zone_split(dataset_path)
+    train_base, val_base, test_base = stratified_zone_split(dataset_path, synthetic=synthetic)
     train_set = ZoneSubset(train_base, zones)
     val_set = ZoneSubset(val_base, zones)
     test_set = ZoneSubset(test_base, zones)
@@ -190,7 +202,7 @@ def train_regressor(dataset_dir,batch_size, epochs, lr, weight_decay, patience):
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=0)
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=0)
 
-    model = models.ZoneAwareRegressor(n_channels=10, n_freq=201, n_zones=n_classes, zone_emb_dim=32, output_dim=3).to(device)
+    model = models.ZoneAwareRegressor(n_channels=n_channels, n_freq=n_freq, n_zones=n_classes, zone_emb_dim=32, output_dim=3).to(device)
     criterion = nn.MSELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-6)
@@ -331,7 +343,7 @@ def train_regressor(dataset_dir,batch_size, epochs, lr, weight_decay, patience):
         print(f"ZoneAwareRegressor model NOT saved (test MAE not improved)")
 
 
-def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg_lr, cls_weight_decay, reg_weight_decay, cls_patience, reg_patience, pretrained_classifier=None):
+def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg_lr, cls_weight_decay, reg_weight_decay, cls_patience, reg_patience, pretrained_classifier=None, synthetic=False):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dataset_path = os.path.join('datasets_pytorch', dataset_dir)
     zones, labels_mean, labels_std = compute_zones_for_dataset(dataset_path)
@@ -341,7 +353,7 @@ def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg
     print("=" * 60)
 
     # ================= DATA ================= #
-    train_base, val_base, test_base = stratified_zone_split(dataset_path)
+    train_base, val_base, test_base = stratified_zone_split(dataset_path, synthetic=synthetic)
 
     train_set = ZoneSubset(train_base, zones_array=zones)
     val_set = ZoneSubset(val_base, zones_array=zones)
@@ -353,7 +365,12 @@ def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg
 
     # ================= MODEL ================= #
     n_zones = int(zones.max() + 1)
-    model = models.ZoneAwareTwoStage(n_channels=10, n_freq=201, n_zones=n_zones, zone_emb_dim=32, output_dim=3).to(device)
+    # Set input shape based on dataset type
+    if synthetic:
+        n_channels, n_freq = 5, 400
+    else:
+        n_channels, n_freq = 10, 201
+    model = models.ZoneAwareTwoStage(n_channels=n_channels, n_freq=n_freq, n_zones=n_zones, zone_emb_dim=32, output_dim=3).to(device)
     if pretrained_classifier:
         classifier_path = os.path.join("models_trained", dataset_dir, "zoneclassifier", "zoneclassifier_best_model.pth")
         classifier_state = torch.load(classifier_path, map_location=device)
@@ -607,7 +624,7 @@ def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg
         print("ZoneAwareTwoStage model NOT saved (test MAE not improved)")
 
 
-def train_two_stage_joint(dataset_dir, batch_size, epochs, cls_lr, reg_lr, cls_weight_decay, reg_weight_decay, patience, lambda_reg=1.0):
+def train_two_stage_joint(dataset_dir, batch_size, epochs, cls_lr, reg_lr, cls_weight_decay, reg_weight_decay, patience, lambda_reg=1.0, synthetic=False):
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dataset_path = os.path.join('datasets_pytorch', dataset_dir)
@@ -618,7 +635,7 @@ def train_two_stage_joint(dataset_dir, batch_size, epochs, cls_lr, reg_lr, cls_w
     print("="*60)
 
     # ===== DATA ===== #
-    train_base, val_base, test_base = stratified_zone_split(dataset_path)
+    train_base, val_base, test_base = stratified_zone_split(dataset_path, synthetic=synthetic)
 
     train_set = ZoneSubset(train_base, zones_array=zones)
     val_set = ZoneSubset(val_base, zones_array=zones)
@@ -630,7 +647,12 @@ def train_two_stage_joint(dataset_dir, batch_size, epochs, cls_lr, reg_lr, cls_w
 
     # ===== MODEL ===== #
     n_zones = int(zones.max() + 1)
-    model = models.ZoneAwareTwoStage(n_channels=10, n_freq=201, n_zones=n_zones, zone_emb_dim=32, output_dim=3).to(device)
+    # Set input shape based on dataset type
+    if synthetic:
+        n_channels, n_freq = 5, 400
+    else:
+        n_channels, n_freq = 10, 201
+    model = models.ZoneAwareTwoStage(n_channels=n_channels, n_freq=n_freq, n_zones=n_zones, zone_emb_dim=32, output_dim=3).to(device)
 
     criterion_cls = nn.CrossEntropyLoss()
     criterion_reg = nn.MSELoss()
@@ -818,17 +840,21 @@ def main():
     parser.add_argument('--pretrained_classifier', type=str, default=False)
     parser.add_argument('--cls_patience', type=int, default=20)
     parser.add_argument('--reg_patience', type=int, default=20)
+    parser.add_argument('--synthetic', action='store_true', help='Use synthetic dataset (5 MW configs, 400 freq)')
     args = parser.parse_args()
 
+    # Add --synthetic flag to all modes
+    synthetic = getattr(args, 'synthetic', False)
+
     if args.mode == 'classifier':
-        train_classifier(args.dataset_dir, args.batch_size, args.epochs, args.lr, args.weight_decay, args.patience)
+        train_classifier(args.dataset_dir, args.batch_size, args.epochs, args.lr, args.weight_decay, args.patience, synthetic=synthetic)
     elif args.mode == 'regressor':
-        train_regressor(args.dataset_dir, args.batch_size, args.epochs, args.lr, args.weight_decay, args.patience)
+        train_regressor(args.dataset_dir, args.batch_size, args.epochs, args.lr, args.weight_decay, args.patience, synthetic=synthetic)
     elif args.mode == 'two-stage':
-        train_two_stage(args.dataset_dir, args.batch_size, args.cls_epochs, args.reg_epochs, args.cls_lr, args.reg_lr, args.cls_weight_decay, args.reg_weight_decay, args.cls_patience, args.reg_patience, args.pretrained_classifier)
+        train_two_stage(args.dataset_dir, args.batch_size, args.cls_epochs, args.reg_epochs, args.cls_lr, args.reg_lr, args.cls_weight_decay, args.reg_weight_decay, args.cls_patience, args.reg_patience, args.pretrained_classifier, synthetic=synthetic)
     elif args.mode == 'two-stage-joint':
         train_two_stage_joint(args.dataset_dir, args.batch_size, args.epochs, args.cls_lr, args.reg_lr, args.cls_weight_decay, args.reg_weight_decay, args.patience,
-                              lambda_reg=1.0)
+                              lambda_reg=1.0, synthetic=synthetic)
 
 if __name__ == '__main__':
     main()

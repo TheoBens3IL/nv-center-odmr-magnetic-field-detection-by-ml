@@ -25,22 +25,29 @@ class WeightedMSELoss(nn.Module):
         return loss.mean()
 
 
-def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="dataset_multi_mw", patience=20, min_delta=1e-6, model_name="FrequencyAttention", loss_weights=None, use_attention=False, physics_loss_weight=0.1, show_dataset_stats=False):
+def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="dataset_multi_mw", patience=20, min_delta=1e-6, model_name="FrequencyAttention", loss_weights=None, use_attention=False, physics_loss_weight=0.1, show_dataset_stats=False, synthetic=False):
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     DATASET_DIR = os.path.join("datasets_pytorch", dataset_dir)
+
 
     # Check if model is available
     if model_name not in models.available_models():
         raise ValueError(f"Unknown model: {model_name}. Available models: {list(models.available_models().keys())}")
-    
+
+    # Select input shape based on dataset type
+    if synthetic:
+        n_channels, n_freq = 5, 400
+    else:
+        n_channels, n_freq = 10, 201
+
     model_class = models.available_models()[model_name]
     if model_name == 'HybridODMRPredictor':
-        model = model_class(n_freq=201, use_attention=use_attention).to(DEVICE)
+        model = model_class(n_channels=n_channels, n_freq=n_freq, use_attention=use_attention).to(DEVICE)
     else:
-        model = model_class(n_freq=201).to(DEVICE)
+        model = model_class(n_channels=n_channels, n_freq=n_freq).to(DEVICE)
 
     # Load dataset and create data loaders
-    train_set, val_set, test_set = train_val_test_split(DATASET_DIR)
+    train_set, val_set, test_set = train_val_test_split(DATASET_DIR, synthetic=synthetic)
     train_loader, val_loader, test_loader = get_data_loaders(train_set, val_set, test_set, batch_size=batch_size, device=DEVICE)
 
     # Load normalization stats for denormalization during evaluation
@@ -52,11 +59,7 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
     if show_dataset_stats:
         print_dataset_statistics(train_set, val_set, test_set, label_names, labels_mean, labels_std)
 
-    # Create model based on model_name
-    if model_name == 'HybridODMRPredictor':
-        model = model_class(n_freq=201, use_attention=use_attention).to(DEVICE)
-    else:
-        model = model_class(n_freq=201).to(DEVICE)
+    # Model is already instantiated above with correct n_channels and n_freq
 
     # Loss function
     if model_name == 'HybridODMRPredictor' and loss_weights is not None:
@@ -324,6 +327,7 @@ if __name__ == "__main__":
 
     # Dataset parameters
     parser.add_argument('--dataset_dir', type=str, default='dataset_multi_mw_2', help='Path to dataset directory (default: dataset_multi_mw_2 in datasets_pytorch/)')
+    parser.add_argument('--synthetic', action='store_true', help='Use synthetic dataset (5 MW configs, 400 freq)')
 
     # Hybrid-specific arguments
     parser.add_argument('--loss_weights', type=float, nargs=3, default=None, help='Loss weights for [Ax, Ay, Az] (only for HybridODMRPredictor)')
@@ -337,12 +341,18 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    if args.model == 'HybridODMRPredictor':
-        nb_param = sum(p.numel() for p in models.available_models()[args.model](n_freq=201, use_attention=args.use_attention).parameters())
+    # Set input shape for model param count
+    if args.synthetic:
+        n_channels, n_freq = 5, 400
     else:
-        nb_param = sum(p.numel() for p in models.available_models()[args.model](n_freq=201).parameters())
+        n_channels, n_freq = 10, 201
+
+    if args.model == 'HybridODMRPredictor':
+        nb_param = sum(p.numel() for p in models.available_models()[args.model](n_channels=n_channels, n_freq=n_freq, use_attention=args.use_attention).parameters())
+    else:
+        nb_param = sum(p.numel() for p in models.available_models()[args.model](n_channels=n_channels, n_freq=n_freq).parameters())
     dataset_dir_arg = os.path.join("datasets_pytorch", args.dataset_dir)
-    train_set, _, _ = train_val_test_split(dataset_dir_arg)
+    train_set, _, _ = train_val_test_split(dataset_dir_arg, synthetic=args.synthetic)
     nb_param_per_sample = nb_param / len(train_set) if len(train_set) > 0 else float('nan')
 
     print("=" * 60)
@@ -357,12 +367,13 @@ if __name__ == "__main__":
     print(f"Patience:       {args.patience}")
     print(f"Min delta:      {args.min_delta}")
     print(f"Dataset dir:    {args.dataset_dir}")
+    print(f"Synthetic:      {args.synthetic}")
     if args.model == 'HybridODMRPredictor':
         print(f"Loss weights:   {args.loss_weights}")
         print(f"Use attention:  {args.use_attention}")
     print("=" * 60)
 
     try:
-        train(batch_size=args.batch_size, epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay, dataset_dir=args.dataset_dir, patience=args.patience, min_delta=args.min_delta, model_name=args.model, loss_weights=args.loss_weights, use_attention=args.use_attention, physics_loss_weight=args.physics_loss_weight, show_dataset_stats=args.show_dataset_stats)
+        train(batch_size=args.batch_size, epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay, dataset_dir=args.dataset_dir, patience=args.patience, min_delta=args.min_delta, model_name=args.model, loss_weights=args.loss_weights, use_attention=args.use_attention, physics_loss_weight=args.physics_loss_weight, show_dataset_stats=args.show_dataset_stats, synthetic=args.synthetic)
     except Exception as e:
         print(f"Error: {e}")
