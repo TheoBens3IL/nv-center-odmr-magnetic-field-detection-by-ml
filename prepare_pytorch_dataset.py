@@ -111,7 +111,7 @@ def normalize_global(signals):
     return (signals - global_mean) / (global_std + 1e-8)
 
 
-def create_pytorch_dataset(dataset_dir, output_dir):
+def create_pytorch_dataset(dataset_dir, output_dir, n_mw_configs=10):
     """
     Process raw ODMR data into PyTorch-compatible format.
     Parameters:
@@ -155,20 +155,17 @@ def create_pytorch_dataset(dataset_dir, output_dir):
     # Load currents
     Ax, Ay, Az = load_currents(currents_csv)
     label_names = ['Ax', 'Ay', 'Az']
-    frequencies, _ = load_esr_multi_mw(split_files[0])
+    frequencies, _ = load_esr_multi_mw(split_files[0], n_mw_configs=n_mw_configs)
     freq_path = output_dir / 'frequencies.npy'
     np.save(freq_path, frequencies.astype(np.float32))
     all_signals = []
     for split_path in tqdm(split_files, desc="Loading signals"):
-        _, signals = load_esr_multi_mw(split_path)
+        _, signals = load_esr_multi_mw(split_path, n_mw_configs=n_mw_configs)
         all_signals.append(signals)
     all_signals = np.stack(all_signals, axis=0)
 
     # Apply global normalization to signals before saving (preserves relative differences between spectra)
     all_signals = normalize_global(all_signals)
-    
-    # Stack all signals: (2109, 10, 201)
-    all_signals = np.stack(all_signals, axis=0)
 
     # Compute normalization stats
     labels_mean = np.array([Ax[:len(split_files)].mean(), 
@@ -214,7 +211,9 @@ def create_pytorch_dataset(dataset_dir, output_dir):
     print(f"  - metadata.csv: {len(metadata)} experiments (NORMALIZED labels)")
     print(f"  - frequencies.npy: {len(frequencies)} frequencies")
     print(f"  - normalization_stats.npy: label normalization parameters")
-    print(f"  - signals/: {len(split_files)} files, each with shape (10, 201)")
+    n_rep = (np.loadtxt(split_files[0], delimiter='\t').shape[0] - 1) // n_mw_configs
+    print(f"  - signals/: {len(split_files)} files, each with shape {tuple(all_signals.shape[1:])}")
+    print(f"  - MW configs: {n_mw_configs}, repetitions per config: {n_rep}")
     print(f"\nSignal statistics:")
     print(f"  Min: {all_signals.min():.4f}")
     print(f"  Max: {all_signals.max():.4f}")
@@ -233,7 +232,10 @@ def main():
                        help='Input directory with raw data (default: dataset_10ElliptConf_V2 in datasets_raw/)')
     parser.add_argument('--output_dir', type=str, default=None,
                        help='Output directory (default: auto-generated from input name)')
+    parser.add_argument('--n_mw_configs', type=int, default=10,
+                       help='Number of MW configurations (default: 10)')
     args = parser.parse_args()
+
     input_dir = os.path.join("datasets_raw", args.dataset_dir)
     if args.output_dir:
         output_dir = os.path.join("datasets_pytorch", args.output_dir)
@@ -247,8 +249,9 @@ def main():
     print(f"{'='*60}")
     print(f"Input directory: {input_dir}")
     print(f"Output directory: {output_dir}")
+    print(f"MW configurations: {args.n_mw_configs}")
     print(f"{'='*60}\n")
-    create_pytorch_dataset(input_dir, output_dir)
+    create_pytorch_dataset(input_dir, output_dir, n_mw_configs=args.n_mw_configs)
 
 if __name__ == "__main__":
     main()

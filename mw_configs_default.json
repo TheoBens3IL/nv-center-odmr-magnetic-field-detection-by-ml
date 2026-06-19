@@ -1,0 +1,8 @@
+[
+  {"name": "mw0", "MW_field": [0.5, 0.0, 0.0], "MW_phase": 90},
+  {"name": "mw1", "MW_field": [0.5, 0.5, 0.0], "MW_phase": 30},
+  {"name": "mw2", "MW_field": [0.5, 0.5, 0.0], "MW_phase": 150},
+  {"name": "mw3", "MW_field": [0.5, 0.5, 0.0], "MW_phase": 210},
+  {"name": "mw4", "MW_field": [0.5, 0.5, 0.0], "MW_phase": 330},
+  {"name": "mw5", "MW_field": [0.5, 0.5, 0.0], "MW_phase": 270}
+]

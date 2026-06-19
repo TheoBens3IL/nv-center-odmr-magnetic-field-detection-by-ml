@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from pathlib import Path
 import os
+import json
 import pandas as pd
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
@@ -17,21 +18,32 @@ class EarlyStopping:
     Early stopping to halt training when validation loss doesn't improve after a set number (patience) of epochs.
     If no improvement after 'patience' epochs, training stops.
     '''
-    def __init__(self, patience=5, min_delta=0.0):
-        self.patience = patience       # epochs to wait for improvement
-        self.min_delta = min_delta     # minimum change to qualify as improvement
-        self.best_loss = float('inf')  # best validation loss observed
-        self.counter = 0               # epochs since last improvement
-        self.best_state = None         # best model state
+    def __init__(self, patience=5, min_delta=0.0, mode='min'):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.mode = mode
+        self.best_metric = float('inf') if mode == 'min' else float('-inf')
+        self.counter = 0
+        self.best_state = None
 
-    def step(self, val_loss, model):
-        if val_loss < self.best_loss - self.min_delta: # improvement observed
-            self.best_loss = val_loss                  # update best loss
-            self.counter = 0                           # reset counter
-            self.best_state = model.state_dict()       # save best model state
+    def step(self, metric, model):
+        if self.mode == 'min':
+            improved = metric < self.best_metric - self.min_delta
         else:
-            self.counter += 1                          # if no improvement, increment counter
-        return self.counter >= self.patience           # return True if early stopping criterion met
+            improved = metric > self.best_metric + self.min_delta
+
+        if improved:
+            self.best_metric = metric
+            self.counter = 0
+            self.best_state = model.state_dict()
+        else:
+            self.counter += 1
+        return self.counter >= self.patience
+
+    @property
+    def best_loss(self):
+        """Backward-compatible alias for code that reads early_stopping.best_loss."""
+        return self.best_metric
 
 
 def load_normalization_stats(dataset_dir):
@@ -127,6 +139,150 @@ def plot_training_history(history, label_names=['Ax', 'Ay', 'Az'], show=True):
     if show:
         plt.show()
     return fig
+
+
+def mw_count_subdir(mw_indices):
+    """Subdirectory name for a given MW config selection (e.g. [1, 3, 4, 6] -> '4mw')."""
+    return f"{len(mw_indices)}mw"
+
+
+def resolve_model_output_dir(dataset_dir, model_name, mw_indices):
+    """
+    Locate trained model artifacts for a dataset / MW selection.
+
+    Prefers models_trained/<dataset>/<N>mw/<model>/ when present, otherwise
+    falls back to models_trained/<dataset>/<model>/.
+    """
+    dataset_name = Path(dataset_dir).name
+    per_count_dir = get_model_output_dir(dataset_name, model_name, mw_indices, per_mw_count=True)
+    global_dir = get_model_output_dir(dataset_name, model_name, mw_indices, per_mw_count=False)
+    if per_count_dir.exists():
+        return per_count_dir
+    return global_dir
+
+
+def get_model_output_dir(dataset_dir, model_name, mw_indices=None, per_mw_count=False):
+    """
+    Return output directory for trained model artifacts.
+
+    Global (default): models_trained/<dataset>/<model>/
+    Per MW count:      models_trained/<dataset>/<N>mw/<model>/
+    """
+    base = Path("models_trained") / Path(dataset_dir)
+    if per_mw_count and mw_indices is not None:
+        base = base / mw_count_subdir(mw_indices)
+    return base / model_name.lower()
+
+
+def read_train_log_mae(log_path):
+    log_path = Path(log_path)
+    if not log_path.exists():
+        return None
+    try:
+        with open(log_path, 'r') as f:
+            prev_log = json.load(f)
+        prev_mae = prev_log.get('metrics', {}).get('mae')
+        if prev_mae is not None:
+            return sum(prev_mae) / len(prev_mae)
+    except Exception:
+        pass
+    return None
+
+
+def try_save_best_checkpoint(model, model_dir, checkpoint_name, record_name, metric_value, higher_is_better=False):
+    """Save checkpoint if metric improves compared to a record file in model_dir."""
+    model_dir = Path(model_dir)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    record_path = model_dir / record_name
+    best_prev = None
+    if record_path.exists():
+        try:
+            best_prev = float(record_path.read_text().strip())
+        except Exception:
+            pass
+
+    improved = best_prev is None
+    if not improved:
+        improved = metric_value > best_prev if higher_is_better else metric_value < best_prev
+
+    if not improved:
+        cmp_word = "higher" if higher_is_better else "lower"
+        print(f"Model not saved to {model_dir}: current={metric_value:.4f}, best={best_prev:.4f} (need {cmp_word})")
+        return False
+
+    torch.save(model.state_dict(), model_dir / checkpoint_name)
+    record_path.write_text(str(metric_value))
+    print(f"Best model saved to {model_dir / checkpoint_name} (metric: {metric_value:.4f})")
+    return True
+
+
+def save_cnn_training_run_if_improved(
+    model,
+    model_dir,
+    model_name,
+    metric_value,
+    history,
+    label_names,
+    labels_mean,
+    labels_std,
+    config,
+    early_stopping,
+    mae_keys,
+    use_physics_loss,
+    physics_loss_weight,
+    plot_training_history_fn,
+):
+    """Save CNN training artifacts if validation MAE improved for this output directory."""
+    from datetime import datetime
+
+    model_dir = Path(model_dir)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    model_path = model_dir / f"{model_name.lower()}_best_model.pth"
+    log_path = model_dir / f"{model_name.lower()}_train_log.json"
+    plot_path = model_dir / f"{model_name.lower()}_training_plot.png"
+
+    best_mae = read_train_log_mae(log_path)
+    if best_mae is not None:
+        print(f"[{model_dir}] current_mae_mean = {metric_value:.4f}, best_mae = {best_mae:.4f}")
+    else:
+        print(f"[{model_dir}] current_mae_mean = {metric_value:.4f}, best_mae = None")
+
+    if best_mae is not None and metric_value >= best_mae:
+        print(f"Model not saved to {model_dir}: previous best MAE={best_mae:.4f} is better or equal.")
+        return False
+
+    torch.save(model.state_dict(), model_path)
+    print(f"Best model saved as {model_path} (MAE: {metric_value:.4f})")
+
+    fig = plot_training_history_fn(history, label_names=label_names, show=False)
+    fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+    print(f"Training history plot saved as {plot_path}")
+
+    norm_stats_path = model_dir / f"{model_name.lower()}_scaler.json"
+    norm_stats = {
+        'labels_mean': labels_mean.tolist() if hasattr(labels_mean, 'tolist') else list(labels_mean),
+        'labels_std': labels_std.tolist() if hasattr(labels_std, 'tolist') else list(labels_std),
+    }
+    with open(norm_stats_path, 'w') as f:
+        json.dump(norm_stats, f, indent=2)
+
+    current_mae = [float(history[mae_keys[i]][-1]) for i in range(len(label_names))]
+    log_data = {
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'model_name': model_name,
+        'model_structure': str(model),
+        'config': config,
+        'val_loss': round(float(early_stopping.best_loss), 3),
+        'train_loss': round(float(history['train_loss'][-1]), 3),
+        'metrics': {
+            'mae': [round(float(v), 4) for v in current_mae],
+            'physics_loss': round(float(history['physics_loss'][-1]), 4) if use_physics_loss else None,
+        },
+    }
+    with open(log_path, 'w') as f:
+        json.dump(log_data, f, indent=2)
+    print(f"Training log saved as {log_path}")
+    return True
 
 
 def nv_axes():
@@ -447,6 +603,277 @@ def visualize_zone_sample_counts(dataset_dir, n_theta=100, n_phi=100):
 
     plt.tight_layout()
     plt.show()
+
+
+def compute_zone_mae(y_pred, y_true, labels_mean, labels_std, zones=None, axis='mean', n_zones=48):
+    """
+    Compute mean absolute error per sphere zone on a test set.
+
+    Args:
+        y_pred, y_true: model outputs and targets (normalized)
+        labels_mean, labels_std: denormalization stats
+        zones: optional zone indices per sample; if None, zones are inferred from true B-field
+        axis: 'mean' (avg over Ax,Ay,Az) or 'Ax' / 'Ay' / 'Az'
+        n_zones: number of zones (48 by default)
+
+    Returns:
+        zone_mae: array (n_zones,) with NaN for zones without test samples
+        zones_np: zone index per sample
+    """
+    y_pred_denorm = denormalize_labels(y_pred, labels_mean, labels_std)
+    y_true_denorm = denormalize_labels(y_true, labels_mean, labels_std)
+    if hasattr(y_pred_denorm, 'numpy'):
+        y_pred_denorm = y_pred_denorm.numpy()
+        y_true_denorm = y_true_denorm.numpy()
+
+    errors = np.abs(y_pred_denorm - y_true_denorm)
+    n_samples = len(errors)
+
+    if zones is None:
+        zones_np = split_zones(y_true_denorm)
+    else:
+        zones_np = zones.cpu().numpy() if hasattr(zones, 'cpu') else np.array(zones)
+        if len(zones_np.shape) > 1:
+            zones_np = zones_np.squeeze()
+        if len(zones_np) != n_samples:
+            zones_np = zones_np[-n_samples:]
+
+    axis_map = {'Ax': 0, 'Ay': 1, 'Az': 2}
+    if axis == 'mean':
+        sample_mae = errors.mean(axis=1)
+    elif axis in axis_map:
+        sample_mae = errors[:, axis_map[axis]]
+    else:
+        raise ValueError(f"axis must be 'mean', 'Ax', 'Ay' or 'Az', got {axis!r}")
+
+    zone_mae = np.full(n_zones, np.nan)
+    for z in range(n_zones):
+        mask = zones_np == z
+        if mask.any():
+            zone_mae[z] = sample_mae[mask].mean()
+    return zone_mae, zones_np
+
+
+def plot_zone_mae_on_sphere(
+    y_pred, y_true, labels_mean, labels_std, zones=None,
+    axis='mean', n_theta=100, n_phi=100, title=None, save_path=None, show=True,
+):
+    """
+    Visualize per-zone MAE on the unit sphere and as a structured 2D heatmap.
+
+    Left  — 3D sphere coloured by mean MAE in each zone (viridis).
+    Right — 2D heatmap (24 ordering indices × 2 sign bits), mirroring zone = ordering*2 + sign.
+
+    Zones with no test samples appear in grey on the sphere and as empty cells in the heatmap.
+    """
+    zone_mae, zones_np = compute_zone_mae(
+        y_pred, y_true, labels_mean, labels_std, zones=zones, axis=axis,
+    )
+    valid = zone_mae[~np.isnan(zone_mae)]
+    if len(valid) == 0:
+        raise ValueError("No zone MAE values to plot (empty test set or no zone overlap).")
+
+    n_covered = int(np.sum(~np.isnan(zone_mae)))
+    print(f"Zone MAE ({axis}): {n_covered}/{len(zone_mae)} zones covered on test set")
+    for z in range(len(zone_mae)):
+        if not np.isnan(zone_mae[z]):
+            print(f"  Zone {z:2d}: MAE = {zone_mae[z]:.4f} A  ({np.sum(zones_np == z)} samples)")
+
+    theta = np.linspace(0, np.pi, n_theta)
+    phi = np.linspace(0, 2 * np.pi, n_phi)
+    Theta, Phi = np.meshgrid(theta, phi)
+    X = np.sin(Theta) * np.cos(Phi)
+    Y = np.sin(Theta) * np.sin(Phi)
+    Z = np.cos(Theta)
+
+    sphere_dirs = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
+    sphere_zones = split_zones(sphere_dirs).reshape(Phi.shape)
+    mae_grid = zone_mae[sphere_zones]
+
+    heatmap = zone_mae.reshape(24, 2)
+    axis_label = 'Mean MAE (Ax,Ay,Az)' if axis == 'mean' else f'MAE ({axis})'
+
+    cmap = plt.get_cmap('viridis').copy()
+    cmap.set_bad(color='0.85')
+    vmin, vmax = valid.min(), valid.max()
+    norm = plt.Normalize(vmin=vmin, vmax=vmax)
+
+    fig = plt.figure(figsize=(16, 7))
+    suptitle = title or 'Model prediction MAE per zone'
+    fig.suptitle(f'{suptitle} — {axis_label}', fontsize=13)
+
+    ax3d = fig.add_subplot(121, projection='3d')
+    mae_grid_masked = np.ma.masked_invalid(mae_grid)
+    fc = cmap(norm(mae_grid_masked))
+    ax3d.plot_surface(X, Y, Z, facecolors=fc, rstride=1, cstride=1,
+                      linewidth=0, antialiased=False, shade=False)
+    ax3d.set_title('MAE on unit sphere')
+    ax3d.set_xlabel('X'); ax3d.set_ylabel('Y'); ax3d.set_zlabel('Z')
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array(valid)
+    fig.colorbar(sm, ax=ax3d, label=f'{axis_label} (A)', shrink=0.6)
+
+    ax2d = fig.add_subplot(122)
+    heatmap_masked = np.ma.masked_invalid(heatmap)
+    im = ax2d.imshow(heatmap_masked, cmap=cmap, norm=norm, aspect='auto')
+    ax2d.set_title('2D heatmap  (ordering × sign bit)')
+    ax2d.set_xlabel('Sign bit  (0 = toward dominant axis, 1 = away)')
+    ax2d.set_ylabel('Ordering index (0–23)')
+    ax2d.set_xticks([0, 1])
+    ax2d.set_xticklabels(['0 (toward)', '1 (away)'])
+    for i in range(24):
+        for j in range(2):
+            val = heatmap[i, j]
+            if np.isnan(val):
+                continue
+            color = 'white' if val < vmax * 0.6 else 'black'
+            ax2d.text(j, i, f'{val:.3f}', ha='center', va='center', fontsize=7, color=color)
+    fig.colorbar(im, ax=ax2d, label=f'{axis_label} (A)')
+
+    plt.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Zone MAE sphere plot saved to {save_path}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return fig, zone_mae
+
+
+def select_extreme_zones(zone_mae, zones_np, min_samples=1):
+    """
+    Pick best (lowest MAE) and worst (highest MAE) zones — same criterion as the sphere heatmap.
+
+    Args:
+        min_samples: minimum test samples in a zone to be eligible (default 1 = match sphere extrema)
+    """
+    counts = np.bincount(zones_np, minlength=len(zone_mae))
+    eligible = [
+        z for z in range(len(zone_mae))
+        if not np.isnan(zone_mae[z]) and counts[z] >= min_samples
+    ]
+    if len(eligible) < 2:
+        raise ValueError(
+            f"Need at least 2 zones with >={min_samples} test samples, found {len(eligible)}."
+        )
+    best_zone = min(eligible, key=lambda z: zone_mae[z])
+    worst_zone = max(eligible, key=lambda z: zone_mae[z])
+    return best_zone, worst_zone, counts
+
+
+def _zone_description(zone_id):
+    ordering = zone_id // 2
+    sign_bit = zone_id % 2
+    sign_label = 'toward' if sign_bit == 0 else 'away'
+    return f'zone {zone_id} (ordering {ordering}, {sign_label} dominant axis)'
+
+
+def plot_extreme_zone_signals(
+    signals,
+    y_pred,
+    y_true,
+    zones,
+    labels_mean,
+    labels_std,
+    freq_axis_hz,
+    zone_mae=None,
+    mw_indices=None,
+    axis='mean',
+    min_samples=1,
+    title=None,
+    save_path=None,
+    show=True,
+):
+    """
+    Compare ODMR spectra between the best- and worst-performing zones (by mean test MAE).
+
+    For each zone, plots the first test sample only (one spectrum per MW config).
+    """
+    if hasattr(signals, 'numpy'):
+        signals = signals.numpy()
+    zone_mae, zones_np = compute_zone_mae(
+        y_pred, y_true, labels_mean, labels_std, zones=zones, axis=axis,
+    )
+    best_zone, worst_zone, counts = select_extreme_zones(zone_mae, zones_np, min_samples=min_samples)
+
+    y_pred_denorm = denormalize_labels(y_pred, labels_mean, labels_std)
+    y_true_denorm = denormalize_labels(y_true, labels_mean, labels_std)
+    if hasattr(y_pred_denorm, 'numpy'):
+        y_pred_denorm = y_pred_denorm.numpy()
+        y_true_denorm = y_true_denorm.numpy()
+
+    sample_mae = np.abs(y_pred_denorm - y_true_denorm).mean(axis=1)
+
+    freq_axis_hz = np.asarray(freq_axis_hz)
+    freq_plot = freq_axis_hz / 1e9 if freq_axis_hz.max() > 1e6 else freq_axis_hz
+
+    n_mw = signals.shape[1]
+    if mw_indices is None:
+        mw_labels = [f'MW {i}' for i in range(n_mw)]
+    else:
+        mw_labels = [f'MW {i}' for i in mw_indices]
+
+    zone_pairs = [
+        ('Best zone', best_zone, 'tab:green'),
+        ('Worst zone', worst_zone, 'tab:red'),
+    ]
+
+    print(f"\nExtreme zones ({axis} MAE — same metric as sphere heatmap, min {min_samples} sample(s)/zone):")
+    first_indices = {}
+    for label, zid, _ in zone_pairs:
+        sample_idx = int(np.where(zones_np == zid)[0][0])
+        first_indices[zid] = sample_idx
+        b_true = y_true_denorm[sample_idx]
+        b_pred = y_pred_denorm[sample_idx]
+        err = np.abs(b_pred - b_true)
+        print(f"  {label}: {_zone_description(zid)} — first test sample #{sample_idx}")
+        print(f"    zone MAE={zone_mae[zid]:.4f} A | n={counts[zid]} samples in zone")
+        print(f"    sample MAE={sample_mae[sample_idx]:.4f} A")
+        print(f"    B true (Ax,Ay,Az)=({b_true[0]:.4f}, {b_true[1]:.4f}, {b_true[2]:.4f}) A")
+        print(f"    B pred (Ax,Ay,Az)=({b_pred[0]:.4f}, {b_pred[1]:.4f}, {b_pred[2]:.4f}) A")
+        print(f"    abs err (Ax,Ay,Az)=({err[0]:.4f}, {err[1]:.4f}, {err[2]:.4f}) A")
+
+    fig, axes = plt.subplots(n_mw, 2, figsize=(14, 3.0 * n_mw), sharex=True, sharey='row')
+    if n_mw == 1:
+        axes = np.array([axes])
+
+    for col, (col_title, zid, color) in enumerate(zone_pairs):
+        sample_idx = first_indices[zid]
+        sample_signals = signals[sample_idx]  # (n_mw, n_freq)
+        zone_mae_val = zone_mae[zid]
+        sample_mae_val = sample_mae[sample_idx]
+
+        for row in range(n_mw):
+            ax = axes[row, col]
+            ax.plot(freq_plot, sample_signals[row], color=color, linewidth=1.8)
+            ax.set_ylabel('Signal (a.u.)')
+            ax.grid(True, alpha=0.3)
+            if row == 0:
+                ax.set_title(
+                    f"{col_title}: {_zone_description(zid)}\n"
+                    f"sample #{sample_idx} MAE={sample_mae_val:.4f} A | "
+                    f"zone MAE={zone_mae_val:.4f} A (n={counts[zid]})",
+                    fontsize=10, pad=12,
+                )
+            if col == 0:
+                ax.text(-0.18, 0.5, mw_labels[row], transform=ax.transAxes,
+                        rotation=90, va='center', ha='center', fontsize=10)
+
+        axes[-1, col].set_xlabel('Frequency (GHz)', labelpad=8)
+
+    suptitle = title or 'ODMR spectra: best vs worst zone'
+    fig.suptitle(suptitle, fontsize=13, y=0.98)
+    fig.subplots_adjust(top=0.90, bottom=0.08, left=0.12, right=0.98, hspace=0.55)
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"Extreme zone signals plot saved to {save_path}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return fig, best_zone, worst_zone
 
 
 if __name__ == "__main__":

@@ -1,0 +1,8 @@
+{
+  "base_model": "ZoneAwareTwoStage",
+  "spectrum_loss_weight": 0.1,
+  "lorentzian_gamma_mhz": 50.0,
+  "refine_steps": 0,
+  "test_mae_raw": 1.23233842276155,
+  "test_mae_refined": null
+}

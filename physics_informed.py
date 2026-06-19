@@ -4,6 +4,134 @@ from scipy.signal import find_peaks
 from scipy.optimize import curve_fit
 
 
+# Lab calibration: coil current (A) -> magnetic field at the NV (mT)
+CURRENT_TO_FIELD_MT_PER_A = 0.765
+CURRENT_TO_FIELD_T_PER_A = CURRENT_TO_FIELD_MT_PER_A * 1e-3
+
+
+# Typical ODMR dip HWHM scale (MHz) — used to express frequency errors as dimensionless
+# fractions (~1 = one linewidth), not an arbitrary rescaling from GHz.
+ODMR_LINEWIDTH_MHZ = 50.0
+NV_TRANSITIONS_PER_SAMPLE = 8
+
+
+def current_to_magnetic_field(current_A, t_per_a=None):
+    """
+    Convert lab current components (Ax, Ay, Az) in Amperes to B-field in Tesla.
+
+    Default scale: 1 A -> 0.765 mT.
+    """
+    if t_per_a is None:
+        t_per_a = CURRENT_TO_FIELD_T_PER_A
+    return current_A * t_per_a
+
+
+def _hz_to_mhz(freq_hz):
+    return freq_hz * 1e-6
+
+
+def _normalized_freq_mse_mhz(diff_mhz):
+    """Dimensionless MSE: (Δf / linewidth)² averaged over terms."""
+    return ((diff_mhz / ODMR_LINEWIDTH_MHZ) ** 2).mean()
+
+
+def physics_loss_label_transitions(current_pred, current_true, t_per_a=None):
+    """
+    Hamiltonian consistency: NV transitions from predicted vs true currents (A).
+
+    Compares the 8 slot-ordered transitions (4 NV axes × f⁻/f⁺) in MHz.
+    """
+    B_pred = current_to_magnetic_field(current_pred, t_per_a=t_per_a)
+    B_true = current_to_magnetic_field(current_true.detach(), t_per_a=t_per_a)
+    f_pred_mhz = _hz_to_mhz(nv_transitions_4axes(B_pred))
+    f_true_mhz = _hz_to_mhz(nv_transitions_4axes(B_true))
+    return _normalized_freq_mse_mhz(f_pred_mhz - f_true_mhz)
+
+
+def physics_loss_peaks_per_slot(f_pred_hz, measured_freqs_hz):
+    """
+    Match each NV transition slot to its nearest measured ODMR dip (MHz).
+
+    Unlike global sorting, each of the 8 Hamiltonian slots is aligned to the
+    closest detected dip frequency, which preserves NV-axis ordering in f_pred.
+    """
+    f_pred_mhz = _hz_to_mhz(f_pred_hz)
+    measured_mhz = _hz_to_mhz(measured_freqs_hz.detach().to(f_pred_hz.device))
+
+    diff = f_pred_mhz.unsqueeze(2) - measured_mhz.unsqueeze(1)  # (B, 8, 8)
+    nan_mask = torch.isnan(measured_mhz).unsqueeze(1).expand_as(diff)
+    diff = diff.masked_fill(nan_mask, float("inf"))
+
+    min_abs_mhz = diff.abs().amin(dim=2)  # (B, 8)
+    valid = torch.isfinite(min_abs_mhz)
+    if not valid.any():
+        return torch.tensor(0.0, device=f_pred_hz.device, dtype=f_pred_hz.dtype)
+    return ((min_abs_mhz[valid] / ODMR_LINEWIDTH_MHZ) ** 2).mean()
+
+
+def physics_loss_from_current(
+    current_pred,
+    measured_freqs=None,
+    current_true=None,
+    peak_weight=0.5,
+    label_weight=0.5,
+    t_per_a=None,
+):
+    """
+    Combined physics-informed loss (dimensionless, ODMR linewidth-normalized).
+
+    Terms:
+        - label: nv_transitions(B_pred) vs nv_transitions(B_true)
+        - peaks: each NV slot vs nearest measured dip in the spectrum
+
+    Frequencies internally use MHz (natural ODMR unit); inputs/outputs in Hz/A unchanged.
+    """
+    if current_true is None and measured_freqs is None:
+        return torch.tensor(0.0, device=current_pred.device, dtype=current_pred.dtype)
+
+    loss = torch.tensor(0.0, device=current_pred.device, dtype=current_pred.dtype)
+    B_pred = current_to_magnetic_field(current_pred, t_per_a=t_per_a)
+
+    if current_true is not None and label_weight > 0:
+        loss = loss + label_weight * physics_loss_label_transitions(
+            current_pred, current_true, t_per_a=t_per_a,
+        )
+    if measured_freqs is not None and peak_weight > 0:
+        f_pred_hz = nv_transitions_4axes(B_pred)
+        loss = loss + peak_weight * physics_loss_peaks_per_slot(f_pred_hz, measured_freqs)
+
+    return loss
+
+
+def physics_loss(B_pred, measured_freqs):
+    """Legacy entry point — peak term only, NV slot matching."""
+    f_pred_hz = nv_transitions_4axes(B_pred)
+    return physics_loss_peaks_per_slot(f_pred_hz, measured_freqs)
+
+
+def extract_measured_peaks_batch(signals, freq_axis_Hz, num_peaks=8):
+    """
+    Extract ODMR peak frequencies from a batch of spectra.
+
+    Parameters:
+        signals: tensor (batch, n_mw, n_freq) or (batch, n_freq)
+        freq_axis_Hz: 1D frequency axis in Hz
+
+    Returns:
+        (batch, num_peaks) tensor in Hz (NaN for missing peaks)
+    """
+    signals_np = signals.detach().cpu().numpy()
+    measured_freqs = []
+    for s in signals_np:
+        if s.ndim == 2:
+            spectrum = np.mean(s, axis=0)
+        else:
+            spectrum = s
+        measured_freqs.append(extract_odmr_peak_frequencies(spectrum, freq_axis_Hz, num_peaks=num_peaks))
+    device = signals.device if torch.is_tensor(signals) else "cpu"
+    return torch.tensor(np.array(measured_freqs), dtype=torch.float32, device=device)
+
+
 def spin_operators(device, dtype=torch.complex64):
     """
     Returns spin-1 operators Sx, Sy, Sz (complex Hermitian).
@@ -181,32 +309,6 @@ def nv_transitions_4axes(B_lab):
 #     diff[mask] = f_pred[mask] - measured_freqs[mask]
 
 #     return torch.mean(diff ** 2)
-
-def physics_loss(B_pred, measured_freqs):
-    f_pred = nv_transitions_4axes(B_pred) / 1e9 # (batch, 8) converted to GHz
-
-    # Convert measured_freqs to tensor if needed, and move to same device as f_pred
-    if not torch.is_tensor(measured_freqs):
-        measured_freqs = torch.tensor(measured_freqs, device=f_pred.device)
-    else:
-        measured_freqs = measured_freqs.detach().clone().to(f_pred.device) # ensure it's on the same device and not part of the graph
-        
-    measured_freqs = measured_freqs / 1e9  # convert to GHz
-
-    # Align with peak extraction: measured peaks are sorted by frequency, while f_pred
-    # follows (NV axis k, f_minus, f_plus). Compare sorted sequences so slot i matches
-    # the i-th smallest transition frequency (NaNs from partial detection sort to the end).
-    # keep only valid entries (non-NaN) for loss calculation
-    f_sorted = torch.sort(f_pred, dim=1).values
-    m_sorted = torch.sort(measured_freqs, dim=1).values
-    mask = ~torch.isnan(m_sorted)
-    diff = (f_sorted - m_sorted)[mask]
-
-    # If no valid entries, return zero loss
-    if diff.numel() == 0:
-        return torch.tensor(0.0, device=f_pred.device, dtype=f_pred.dtype)
-
-    return torch.mean(diff ** 2)
 
 
 def lorentzian(f, f0, gamma, depth, offset):
@@ -390,29 +492,33 @@ def extract_odmr_peak_frequencies(
                 # Fallback: keep original spectrum if smoothing fails
                 spec_for_peaks = spectrum.copy()
 
-    # Invert spectrum to detect dips
+    # Invert spectrum to detect dips (works on z-scored or raw spectra)
     inverted = np.max(spec_for_peaks) - spec_for_peaks
+    inv_range = float(inverted.max() - inverted.min())
 
-    # Compute prominence threshold
-    prom_thresh = np.std(inverted) * prominence_factor
+    # Prominence: combine std-based and dynamic-range-based thresholds (normalized spectra)
+    prom_thresh = max(
+        np.std(inverted) * prominence_factor,
+        inv_range * 0.06,
+        1e-8,
+    )
 
     # ---- Rough peak detection (1st pass) ----
     peaks_idx, props = find_peaks(inverted, distance=distance, prominence=prom_thresh)
 
-    # If we detect too few peaks, relax the criteria and retry once
-    if len(peaks_idx) < num_peaks:
-        relaxed_prom = prom_thresh * 0.5
+    # Relax criteria progressively if too few dips are found
+    for relax in (0.5, 0.25):
+        if len(peaks_idx) >= num_peaks:
+            break
+        relaxed_prom = prom_thresh * relax
         relaxed_dist = max(1, distance // 2)
         peaks_idx2, props2 = find_peaks(inverted, distance=relaxed_dist, prominence=relaxed_prom)
-        # Merge unique indices from both passes
         if len(peaks_idx2) > 0:
             peaks_idx = np.unique(np.concatenate([peaks_idx, peaks_idx2]))
-            # Use prominences from the more permissive pass when available
-            if 'prominences' in props2:
-                # Build a simple prominence array aligned with peaks_idx (fallback to inverted value)
-                prom_map = {int(i): float(p) for i, p in zip(peaks_idx2, props2['prominences'])}
+            if "prominences" in props2:
+                prom_map = {int(i): float(p) for i, p in zip(peaks_idx2, props2["prominences"])}
                 prominences_full = np.array([prom_map.get(int(i), inverted[int(i)]) for i in peaks_idx])
-                props = {'prominences': prominences_full}
+                props = {"prominences": prominences_full}
 
     if len(peaks_idx) == 0:
         return np.full(num_peaks, np.nan)
@@ -444,11 +550,15 @@ def extract_odmr_peak_frequencies(
 
         fitted_freqs.append(center_freq)
 
-    # Sort fitted frequencies ascending
-    fitted_freqs = np.sort(fitted_freqs)
+    # Keep prominence order (no global sort) — slot matching handles alignment
+    fitted_freqs = np.array(fitted_freqs, dtype=np.float64)
 
     # Pad if less than num_peaks
     if len(fitted_freqs) < num_peaks:
-        fitted_freqs = np.pad(fitted_freqs, (0, num_peaks - len(fitted_freqs)), constant_values=np.nan)
+        fitted_freqs = np.pad(
+            fitted_freqs, (0, num_peaks - len(fitted_freqs)), constant_values=np.nan,
+        )
+    else:
+        fitted_freqs = fitted_freqs[:num_peaks]
 
-    return np.array(fitted_freqs)
+    return fitted_freqs

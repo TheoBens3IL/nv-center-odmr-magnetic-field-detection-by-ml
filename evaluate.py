@@ -6,8 +6,11 @@ import models
 from pathlib import Path
 from torch.utils.data import DataLoader
 from train_zone_models import ZoneSubset
-from utils import load_normalization_stats, denormalize_labels, compute_zones_for_dataset
-from dataset import train_val_test_split, infer_synthetic_signal_shape
+from utils import (
+    load_normalization_stats, denormalize_labels, compute_zones_for_dataset,
+    resolve_model_output_dir, plot_zone_mae_on_sphere, plot_extreme_zone_signals,
+)
+from dataset import train_val_test_split, stratified_zone_split, resolve_mw_indices, detect_num_mw_configs, detect_n_freq, get_frequency_axis
 from sklearn.metrics import r2_score
 import matplotlib.pyplot as plt
 
@@ -21,14 +24,14 @@ def _canonical_model_name(name: str) -> str:
     return by_lower.get(name.lower(), name)
 
 
-def load_model(model_name, model_dir, dataset_dir, device='cpu'):
+def load_model(model_name, model_dir, dataset_dir, device='cpu', mw_indices=None, synthetic=False):
     model_name = _canonical_model_name(model_name)
     model_class = models.__dict__[model_name]
-    # Même logique que train_zone_models: taille (n_mw, n_freq) lue depuis les .npy si possible
-    try:
-        n_channels, n_freq = infer_synthetic_signal_shape(dataset_dir)
-    except (FileNotFoundError, ValueError):
-        n_channels, n_freq = 10, 201
+    if mw_indices is not None:
+        n_channels = len(mw_indices)
+    else:
+        n_channels = detect_num_mw_configs(dataset_dir, synthetic=synthetic)
+    n_freq = detect_n_freq(dataset_dir, synthetic=synthetic)
 
     if model_name == 'HybridODMRPredictor':
         model = model_class(n_channels=n_channels, n_freq=n_freq, use_attention=False)
@@ -43,6 +46,10 @@ def load_model(model_name, model_dir, dataset_dir, device='cpu'):
 
     if model_name == 'ZoneAwareTwoStage' and 'zoneawaretwostage_joint' in str(model_dir):
         state_path = Path(model_dir) / "zoneawaretwostage_joint_best_model.pth"
+    elif model_name == 'ZoneAwareTwoStage' and 'physics_guided_joint' in str(model_dir):
+        state_path = Path(model_dir) / "physics_guided_joint_best_model.pth"
+    elif 'physics_guided_cnn' in str(model_dir):
+        state_path = Path(model_dir) / "physics_guided_cnn_best_model.pth"
     else:
         state_path = Path(model_dir) / f"{model_name.lower()}_best_model.pth"
     model.load_state_dict(torch.load(state_path, map_location=device))
@@ -51,10 +58,17 @@ def load_model(model_name, model_dir, dataset_dir, device='cpu'):
     return model
 
 
-def get_test_loader(dataset_dir, model_type, batch_size=64):
+def get_test_loader(dataset_dir, model_type, batch_size=64, mw_indices=None, synthetic=False,
+                    val_size=0.10, test_size=0.10, balanced_val=True, val_samples_per_zone=None,
+                    balanced_test=False, test_samples_per_zone=1):
     if 'zone' in model_type.lower():
         zones, labels_mean, labels_std = compute_zones_for_dataset(dataset_dir)
-        train_set, val_set, test_set = train_val_test_split(dataset_dir)
+        _, _, test_set = stratified_zone_split(
+            dataset_dir, synthetic=synthetic, mw_indices=mw_indices,
+            val_size=val_size, test_size=test_size,
+            balanced_val=balanced_val, val_samples_per_zone=val_samples_per_zone,
+            balanced_test=balanced_test, test_samples_per_zone=test_samples_per_zone,
+        )
         if 'classifier' in model_type.lower():
             test_set = ZoneSubset(test_set, zones, regression=False)
         else:
@@ -63,7 +77,7 @@ def get_test_loader(dataset_dir, model_type, batch_size=64):
         norm_stats = load_normalization_stats(dataset_dir)
         labels_mean = norm_stats['labels_mean']
         labels_std = norm_stats['labels_std']
-        train_set, val_set, test_set = train_val_test_split(dataset_dir)
+        _, _, test_set = train_val_test_split(dataset_dir, synthetic=synthetic, mw_indices=mw_indices)
 
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=0)
     return test_loader, labels_mean, labels_std
@@ -125,6 +139,39 @@ def evaluate_two_stage(model, test_loader, device='cpu'):
     y_true = torch.cat(all_labels, dim=0)
     zones_cat = torch.cat(all_zones, dim=0)
     return y_pred, y_true, zones_cat
+
+
+def collect_regression_outputs(model, test_loader, device='cpu', two_stage=False):
+    """Run inference and keep signals alongside predictions (for signal visualization)."""
+    all_signals, all_preds, all_labels, all_zones = [], [], [], []
+    with torch.no_grad():
+        for batch in test_loader:
+            if two_stage:
+                signals, labels, zones_batch = batch
+                signals = signals.to(device)
+                labels = labels.to(device)
+                logits = model.forward_classifier(signals)
+                zones_pred = logits.argmax(dim=1)
+                preds = model.forward_regressor(signals, zones_pred)
+                zones_batch = zones_batch.to(device)
+            else:
+                signals, labels, zones_batch = batch
+                signals = signals.to(device)
+                labels = labels.to(device)
+                zones_batch = zones_batch.to(device)
+                preds = model(signals, zones_batch)
+
+            all_signals.append(signals.cpu())
+            all_preds.append(preds.cpu())
+            all_labels.append(labels.cpu())
+            all_zones.append(zones_batch.cpu())
+
+    return (
+        torch.cat(all_signals),
+        torch.cat(all_preds),
+        torch.cat(all_labels),
+        torch.cat(all_zones),
+    )
 
 
 def compute_metrics(y_pred, y_true, labels_mean, labels_std):
@@ -210,6 +257,7 @@ def plot_test_precision(y_pred, y_true, labels_mean, labels_std, model_name=None
     if save_path:
         fig.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"Test precision plot saved to {save_path}")
+        plt.close(fig)
     else:
         plt.show()
 
@@ -253,6 +301,7 @@ def plot_zone_precision(y_pred, y_true, zones, labels_mean, labels_std, save_pat
     if save_path:
         fig.savefig(save_path, dpi=150, bbox_inches='tight')
         print(f"Zone precision heatmap saved to {save_path}")
+        plt.close(fig)
     else:
         plt.show()
 
@@ -261,41 +310,113 @@ def main():
     parser = argparse.ArgumentParser(description='Evaluate a trained model on its test set.')
     parser.add_argument('--model', type=str, required=True, help='Name of the model to evaluate (e.g., "ODMRPredictor", "ZoneAwareRegressor", "ZoneClassifier", "ZoneAwareTwoStage")')
     parser.add_argument('--dataset_dir', type=str, default="dataset_multi_mw_2")
+    parser.add_argument('--mw_configs', type=int, nargs='+', default=None,
+                        help='Subset of MW config indices (default: all channels in the dataset)')
+    parser.add_argument('--synthetic', action='store_true', help='Use synthetic dataset (5 MW configs, 400 freq)')
+    parser.add_argument('--axis', type=str, default='mean', choices=['mean', 'Ax', 'Ay', 'Az'],
+                        help='Component for per-zone MAE sphere plot (default: mean over Ax,Ay,Az)')
+    parser.add_argument('--save_plots', type=str, default=None,
+                        help='Directory to save evaluation plots (optional)')
+    parser.add_argument('--plot_extreme_zones', action='store_true',
+                        help='Plot ODMR signals for best- and worst-MAE zones on the test set')
+    parser.add_argument('--min_zone_samples', type=int, default=1,
+                        help='Minimum test samples per zone when picking best/worst (default: 1, same as sphere)')
+    parser.add_argument('--balanced_test', action='store_true', default=False,
+                        help='Legacy: fixed test count per zone (disables homogeneous val split)')
+    parser.add_argument('--no_balanced_test', action='store_false', dest='balanced_test',
+                        help=argparse.SUPPRESS)
+    parser.add_argument('--test_samples_per_zone', type=int, default=1,
+                        help='Test samples per zone when --balanced_test (default: 1)')
+    parser.add_argument('--val_samples_per_zone', type=int, default=None,
+                        help='Val samples per zone (default: auto from 10%% target)')
+    parser.add_argument('--no_balanced_val', action='store_true',
+                        help='Proportional val/test per zone instead of homogeneous val')
     args = parser.parse_args()
 
     # Set device
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-    # Paths
-    # Special handling for joint-trained two-stage model
-    if args.model.lower() == 'zoneawaretwostage_joint':
-        model_dir = Path("models_trained") / Path(args.dataset_dir) / 'zoneawaretwostage_joint'
-        model_name = 'ZoneAwareTwoStage'
-    else:
-        model_dir = Path("models_trained") / Path(args.dataset_dir) / args.model.lower()
-        model_name = _canonical_model_name(args.model)
 
     # Add 'datasets_pytorch' if necessary
     if args.dataset_dir is not None:
         if not (args.dataset_dir.startswith('datasets_pytorch') or os.path.isabs(args.dataset_dir)):
             args.dataset_dir = os.path.join("datasets_pytorch", args.dataset_dir)
 
-    test_loader, labels_mean, labels_std = get_test_loader(args.dataset_dir, model_name, batch_size=64)
-    model = load_model(model_name, model_dir, args.dataset_dir, device=device)
+    mw_indices = resolve_mw_indices(
+        synthetic=args.synthetic, mw_configs=args.mw_configs, dataset_dir=args.dataset_dir,
+    )
+
+    # Paths
+    if args.model.lower() == 'zoneawaretwostage_joint':
+        model_key = 'zoneawaretwostage_joint'
+        model_name = 'ZoneAwareTwoStage'
+    elif args.model.lower() == 'physics_guided_joint':
+        model_key = 'physics_guided_joint'
+        model_name = 'ZoneAwareTwoStage'
+    elif args.model.lower() == 'physics_guided_cnn':
+        model_key = 'physics_guided_cnn'
+        model_name = _canonical_model_name('ODMR_CNN')
+    else:
+        model_key = args.model.lower()
+        model_name = _canonical_model_name(args.model)
+
+    model_dir = resolve_model_output_dir(args.dataset_dir, model_key, mw_indices)
+
+    print(f"Loading model from: {model_dir}")
+    print(f"MW configs: {mw_indices} ({len(mw_indices)}/{detect_num_mw_configs(args.dataset_dir, args.synthetic)} channels)")
+
+    if args.save_plots:
+        os.makedirs(args.save_plots, exist_ok=True)
+
+    test_loader, labels_mean, labels_std = get_test_loader(
+        args.dataset_dir, model_name, batch_size=64, mw_indices=mw_indices, synthetic=args.synthetic,
+        balanced_val=not args.no_balanced_val, val_samples_per_zone=args.val_samples_per_zone,
+        balanced_test=args.balanced_test, test_samples_per_zone=args.test_samples_per_zone,
+    )
+    model = load_model(model_name, model_dir, args.dataset_dir, device=device, mw_indices=mw_indices, synthetic=args.synthetic)
     if args.model.lower() == 'zoneclassifier':
         evaluate_classifier(model, test_loader, device=device)
         return
     elif args.model.lower() == 'zoneawareregressor':
-        y_pred, y_true, zones = evaluate_regressor(model, test_loader, device=device)
-        plot_zone_precision(y_pred, y_true, zones, labels_mean, labels_std)
-    elif args.model.lower() == 'zoneawaretwostage' or args.model.lower() == 'zoneawaretwostage_joint':
-        y_pred, y_true, zones = evaluate_two_stage(model, test_loader, device=device)
-        plot_zone_precision(y_pred, y_true, zones, labels_mean, labels_std)
+        signals, y_pred, y_true, zones = collect_regression_outputs(model, test_loader, device=device)
+        plot_zone_precision(y_pred, y_true, zones, labels_mean, labels_std,
+                            save_path=os.path.join(args.save_plots, 'zone_mae_heatmap.png') if args.save_plots else None)
+        plot_zone_mae_on_sphere(y_pred, y_true, labels_mean, labels_std, zones=zones, axis=args.axis,
+                                title=model_name, show=args.save_plots is None,
+                                save_path=os.path.join(args.save_plots, 'zone_mae_sphere.png') if args.save_plots else None)
+        if args.plot_extreme_zones:
+            plot_extreme_zone_signals(
+                signals, y_pred, y_true, zones, labels_mean, labels_std,
+                get_frequency_axis(args.dataset_dir), mw_indices=mw_indices, axis=args.axis,
+                min_samples=args.min_zone_samples, title=model_name,
+                show=args.save_plots is None,
+                save_path=os.path.join(args.save_plots, 'extreme_zone_signals.png') if args.save_plots else None,
+            )
+    elif args.model.lower() in ('zoneawaretwostage', 'zoneawaretwostage_joint', 'physics_guided_joint'):
+        signals, y_pred, y_true, zones = collect_regression_outputs(
+            model, test_loader, device=device, two_stage=True,
+        )
+        plot_zone_precision(y_pred, y_true, zones, labels_mean, labels_std,
+                            save_path=os.path.join(args.save_plots, 'zone_mae_heatmap.png') if args.save_plots else None)
+        plot_zone_mae_on_sphere(y_pred, y_true, labels_mean, labels_std, zones=zones, axis=args.axis,
+                                title=model_name, show=args.save_plots is None,
+                                save_path=os.path.join(args.save_plots, 'zone_mae_sphere.png') if args.save_plots else None)
+        if args.plot_extreme_zones:
+            plot_extreme_zone_signals(
+                signals, y_pred, y_true, zones, labels_mean, labels_std,
+                get_frequency_axis(args.dataset_dir), mw_indices=mw_indices, axis=args.axis,
+                min_samples=args.min_zone_samples, title=model_name,
+                show=args.save_plots is None,
+                save_path=os.path.join(args.save_plots, 'extreme_zone_signals.png') if args.save_plots else None,
+            )
     else:
         y_pred, y_true = evaluate_cnn(model, test_loader, device=device)
+        plot_zone_mae_on_sphere(y_pred, y_true, labels_mean, labels_std, zones=None, axis=args.axis,
+                                title=model_name, show=args.save_plots is None,
+                                save_path=os.path.join(args.save_plots, 'zone_mae_sphere.png') if args.save_plots else None)
     
     compute_metrics(y_pred, y_true, labels_mean, labels_std)
-    plot_test_precision(y_pred, y_true, labels_mean, labels_std, model_name=model_name)
+    plot_test_precision(y_pred, y_true, labels_mean, labels_std, model_name=model_name,
+                        save_path=os.path.join(args.save_plots, 'test_precision.png') if args.save_plots else None)
 
 
 if __name__ == '__main__':
