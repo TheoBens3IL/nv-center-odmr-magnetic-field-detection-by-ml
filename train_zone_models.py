@@ -1,15 +1,48 @@
 import os
 import argparse
+import time
 import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from dataset import stratified_zone_split, resolve_mw_indices, detect_num_mw_configs, detect_n_freq, get_frequency_axis, resolve_dataset_path
-from utils import EarlyStopping, denormalize_labels, compute_zones_for_dataset, get_model_output_dir, try_save_best_checkpoint
+from utils import EarlyStopping, denormalize_labels, compute_zones_for_dataset, get_model_output_dir, try_save_best_checkpoint, print_training_timing, format_duration
 from physics_informed import extract_measured_peaks_batch, physics_loss_from_current, CURRENT_TO_FIELD_MT_PER_A
 import models
 
-# Wrapper to add zone indices to the base dataset splits (Subset[ODMRDatasetMultiConfig]) for zone-aware training 
+def zone_arch_config(deep=False):
+    """Return model classes and checkpoint/dir names for v1 or deep zone architectures."""
+    if deep:
+        return {
+            'classifier_cls': models.ZoneClassifier2,
+            'regressor_cls': models.ZoneAwareRegressor2,
+            'twostage_cls': models.ZoneAwareTwoStageJointDeep,
+            'classifier_dir': 'zoneclassifier2',
+            'regressor_dir': 'zoneawareregressor2',
+            'twostage_dir': 'zoneawaretwostage2',
+            'joint_dir': 'zoneawaretwostagejointdeep',
+            'classifier_ckpt': 'zoneclassifier2_best_model.pth',
+            'regressor_ckpt': 'zoneawareregressor2_best_model.pth',
+            'twostage_ckpt': 'zoneawaretwostage2_best_model.pth',
+            'joint_ckpt': 'zoneawaretwostagejointdeep_best_model.pth',
+            'arch_label': 'deep',
+        }
+    return {
+        'classifier_cls': models.ZoneClassifier,
+        'regressor_cls': models.ZoneAwareRegressor,
+        'twostage_cls': models.ZoneAwareTwoStage,
+        'classifier_dir': 'zoneclassifier',
+        'regressor_dir': 'zoneawareregressor',
+        'twostage_dir': 'zoneawaretwostage',
+        'joint_dir': 'zoneawaretwostagejoint',
+        'classifier_ckpt': 'zoneclassifier_best_model.pth',
+        'regressor_ckpt': 'zoneawareregressor_best_model.pth',
+        'twostage_ckpt': 'zoneawaretwostage_best_model.pth',
+        'joint_ckpt': 'zoneawaretwostagejoint_best_model.pth',
+        'arch_label': 'v1',
+    }
+
+# Wrapper to add zone indices to the base dataset splits (Subset[ODMRDataset]) for zone-aware training
 class ZoneSubset(Dataset):
     def __init__(self, subset, zones_array, regression=True):
         self.subset = subset
@@ -18,7 +51,7 @@ class ZoneSubset(Dataset):
 
     def __len__(self):
         return len(self.subset)
-    
+
     def __getitem__(self, idx):
         base_idx = self.subset.indices[idx]
         signals, labels = self.subset.dataset[base_idx]
@@ -33,23 +66,21 @@ class ZoneSubset(Dataset):
 
 def train_classifier(dataset_dir, batch_size, epochs, lr, weight_decay, patience, synthetic=False, mw_configs=None,
                      val_size=0.10, test_size=0.10, balanced_val=True, val_samples_per_zone=None,
-                     balanced_test=False, test_samples_per_zone=1):
+                     balanced_test=False, test_samples_per_zone=1, deep=False):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dataset_path = resolve_dataset_path(dataset_dir)
     dataset_name = os.path.basename(dataset_path.rstrip("/\\"))
     mw_indices = resolve_mw_indices(synthetic=synthetic, mw_configs=mw_configs, dataset_dir=dataset_path)
 
-    # Set input shape based on dataset type
     n_freq = detect_n_freq(dataset_path, synthetic)
     n_channels = len(mw_indices)
 
     zones, labels_mean, labels_std = compute_zones_for_dataset(dataset_path)
-    print('DEBUG zones uniques:', np.unique(zones))
-    print('DEBUG zone counts:', np.bincount(zones))
     n_classes = int(zones.max() + 1)
+    arch = zone_arch_config(deep)
 
     print("=" * 60)
-    print("ZONE CLASSIFIER TRAINING")
+    print(f"ZONE CLASSIFIER TRAINING ({arch['arch_label']})")
     print("=" * 60)
     print(f"Device:        {device}")
     print(f"Dataset:       {dataset_path}")
@@ -76,17 +107,18 @@ def train_classifier(dataset_dir, batch_size, epochs, lr, weight_decay, patience
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=0)
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=0)
-    
-    model = models.ZoneClassifier(n_channels=n_channels, n_freq=n_freq, n_zones=n_classes).to(device)
+
+    model = arch['classifier_cls'](n_channels=n_channels, n_freq=n_freq, n_zones=n_classes).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-6)
     early_stopping = EarlyStopping(patience=patience, mode='max')
-    
+
     best_val_acc = 0.0
     best_model_state = None
+    t_train_start = time.perf_counter()
+    epochs_completed = 0
     for epoch in range(epochs):
-        # ===== Train ==== #
         model.train()
         train_loss = 0.0
         for signals, zones_batch in train_loader:
@@ -102,7 +134,6 @@ def train_classifier(dataset_dir, batch_size, epochs, lr, weight_decay, patience
             train_loss += loss.item() * signals.size(0)
         train_loss /= len(train_loader.dataset)
 
-        # ===== Validation ===== #
         model.eval()
         val_loss = 0.0
         correct = 0
@@ -125,21 +156,22 @@ def train_classifier(dataset_dir, batch_size, epochs, lr, weight_decay, patience
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             best_model_state = model.state_dict()
-        
+
         if (epoch + 1) % 10 == 0 or epoch == 0:
             print(f"[Classifier] Epoch [{epoch+1:03d}/{epochs}] | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc*100:.2f}% | LR: {optimizer.param_groups[0]['lr']:.2e}")
-        
+
+        epochs_completed = epoch + 1
         if early_stopping.step(val_acc, model):
             print(f"\n[Classifier] Early stopping at epoch {epoch+1}, best val acc = {early_stopping.best_metric*100:.2f}%")
             break
-    
-    # Restore best model of this training run
+
+    print_training_timing("Classifier", t_train_start, epochs_completed, epochs)
+
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
     elif early_stopping.best_state is not None:
         model.load_state_dict(early_stopping.best_state)
-    
-    # ===== Test eval ===== #
+
     model.eval()
     correct = 0
     total = 0
@@ -155,32 +187,32 @@ def train_classifier(dataset_dir, batch_size, epochs, lr, weight_decay, patience
     print(f"\nTest accuracy (zone classification): {test_acc*100:.2f}%")
 
     for per_mw_count in (False, True):
-        model_dir = get_model_output_dir(dataset_name, "zoneclassifier", mw_indices, per_mw_count=per_mw_count)
+        model_dir = get_model_output_dir(dataset_name, arch['classifier_dir'], mw_indices, per_mw_count=per_mw_count)
         try_save_best_checkpoint(
-            model, model_dir, "zoneclassifier_best_model.pth", "best_test_acc.txt",
+            model, model_dir, arch['classifier_ckpt'], "best_test_acc.txt",
             test_acc, higher_is_better=True,
         )
 
     return model, test_acc
 
 
-def train_regressor(dataset_dir,batch_size, epochs, lr, weight_decay, patience, synthetic=False, mw_configs=None,
+def train_regressor(dataset_dir, batch_size, epochs, lr, weight_decay, patience, synthetic=False, mw_configs=None,
                     val_size=0.10, test_size=0.10, balanced_val=True, val_samples_per_zone=None,
-                    balanced_test=False, test_samples_per_zone=1):
+                    balanced_test=False, test_samples_per_zone=1, deep=False):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dataset_path = resolve_dataset_path(dataset_dir)
     dataset_name = os.path.basename(dataset_path.rstrip("/\\"))
     mw_indices = resolve_mw_indices(synthetic=synthetic, mw_configs=mw_configs, dataset_dir=dataset_path)
 
-    # Set input shape based on dataset type
     n_freq = detect_n_freq(dataset_path, synthetic)
     n_channels = len(mw_indices)
 
     zones, labels_mean, labels_std = compute_zones_for_dataset(dataset_path)
     n_classes = int(zones.max() + 1)
+    arch = zone_arch_config(deep)
 
     print("=" * 60)
-    print("ZONE-AWARE REGRESSOR TRAINING")
+    print(f"ZONE-AWARE REGRESSOR TRAINING ({arch['arch_label']})")
     print("=" * 60)
     print(f"Device:        {device}")
     print(f"Dataset:       {dataset_path}")
@@ -206,7 +238,7 @@ def train_regressor(dataset_dir,batch_size, epochs, lr, weight_decay, patience, 
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=0)
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=0)
 
-    model = models.ZoneAwareRegressor(n_channels=n_channels, n_freq=n_freq, n_zones=n_classes, zone_emb_dim=32, output_dim=3).to(device)
+    model = arch['regressor_cls'](n_channels=n_channels, n_freq=n_freq, n_zones=n_classes, zone_emb_dim=32, output_dim=3).to(device)
     criterion = nn.MSELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-6)
@@ -214,17 +246,17 @@ def train_regressor(dataset_dir,batch_size, epochs, lr, weight_decay, patience, 
 
     best_val_mae = float('inf')
     best_model_state = None
-    # --- History for plotting ---
     history = {
         'train_loss': [],
         'val_loss': [],
         'mae_ax': [],
         'mae_ay': [],
         'mae_az': [],
-        'physics_loss': [],  # Not used here, but for compatibility
+        'physics_loss': [],
     }
+    t_train_start = time.perf_counter()
+    epochs_completed = 0
     for epoch in range(epochs):
-        # ===== Train ==== #
         model.train()
         train_loss = 0.0
         for signals, labels, zones_batch in train_loader:
@@ -239,7 +271,6 @@ def train_regressor(dataset_dir,batch_size, epochs, lr, weight_decay, patience, 
             train_loss += loss.item() * signals.size(0)
         train_loss /= len(train_loader.dataset)
 
-        # ===== Validation ===== #
         model.eval()
         val_loss = 0.0
         abs_err_denorm = torch.zeros(3, dtype=torch.float64)
@@ -260,7 +291,6 @@ def train_regressor(dataset_dir,batch_size, epochs, lr, weight_decay, patience, 
         mae_denorm = (abs_err_denorm / n_samples).tolist()
         val_mae_mean = np.mean(mae_denorm)
 
-        # --- Update history ---
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
         history['mae_ax'].append(mae_denorm[0])
@@ -273,24 +303,25 @@ def train_regressor(dataset_dir,batch_size, epochs, lr, weight_decay, patience, 
             best_model_state = model.state_dict()
 
         scheduler.step(val_loss)
-        
+
         if (epoch + 1) % 10 == 0 or epoch == 0:
             print(f"[Regressor] Epoch [{epoch+1:03d}/{epochs}] | Train Loss: {train_loss:.4e} | Val Loss: {val_loss:.4e} | Val MAE (Ax,Ay,Az): ({mae_denorm[0]:.4f}, {mae_denorm[1]:.4f}, {mae_denorm[2]:.4f})")
 
+        epochs_completed = epoch + 1
         if early_stopping.step(val_mae_mean, model):
             print(f"\n[Regressor] Early stopping at epoch {epoch+1}, best val MAE = {early_stopping.best_loss:.4f}")
             break
 
+    print_training_timing("Regressor", t_train_start, epochs_completed, epochs)
+
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
 
-    # --- Plot training history ---
     from utils import plot_training_history
     fig = plot_training_history(history, label_names=['Ax', 'Ay', 'Az'], show=True)
-    fig.savefig(os.path.join("models_trained", dataset_name, "zoneawareregressor", "training_history.png"), dpi=150, bbox_inches='tight')
-    print(f"Training history plot saved to models_trained/{dataset_name}/zoneawareregressor/training_history.png")
+    fig.savefig(os.path.join("models_trained", dataset_name, arch['regressor_dir'], "training_history.png"), dpi=150, bbox_inches='tight')
+    print(f"Training history plot saved to models_trained/{dataset_name}/{arch['regressor_dir']}/training_history.png")
 
-    # ===== Test eval ===== #
     model.eval()
     abs_err_denorm = torch.zeros(3, dtype=torch.float64)
     sq_err_denorm = torch.zeros(3, dtype=torch.float64)
@@ -322,12 +353,11 @@ def train_regressor(dataset_dir,batch_size, epochs, lr, weight_decay, patience, 
     print(f"  MAE  Ax/Ay/Az: {mae[0]:.4f} / {mae[1]:.4f} / {mae[2]:.4f} A")
     print(f"  RMSE Ax/Ay/Az: {rmse[0]:.4f} / {rmse[1]:.4f} / {rmse[2]:.4f} A")
 
-    # Save only if test MAE is best so far (global + per MW-count directories)
     test_mae_mean = np.mean(mae)
     for per_mw_count in (False, True):
-        model_dir = get_model_output_dir(dataset_name, "zoneawareregressor", mw_indices, per_mw_count=per_mw_count)
+        model_dir = get_model_output_dir(dataset_name, arch['regressor_dir'], mw_indices, per_mw_count=per_mw_count)
         try_save_best_checkpoint(
-            model, model_dir, "zoneawareregressor_best_model.pth", "best_test_mae.txt",
+            model, model_dir, arch['regressor_ckpt'], "best_test_mae.txt",
             test_mae_mean, higher_is_better=False,
         )
 
@@ -335,21 +365,21 @@ def train_regressor(dataset_dir,batch_size, epochs, lr, weight_decay, patience, 
 def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg_lr, cls_weight_decay, reg_weight_decay, cls_patience, reg_patience, pretrained_classifier=None, synthetic=False, mw_configs=None,
                     val_size=0.10, test_size=0.10, balanced_val=True, val_samples_per_zone=None,
                     balanced_test=False, test_samples_per_zone=1,
-                    use_physics_loss=False, physics_loss_weight=0.1):
+                    use_physics_loss=False, physics_loss_weight=0.1, deep=False):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dataset_path = resolve_dataset_path(dataset_dir)
     dataset_name = os.path.basename(dataset_path.rstrip("/\\"))
     zones, labels_mean, labels_std = compute_zones_for_dataset(dataset_path)
     mw_indices = resolve_mw_indices(synthetic=synthetic, mw_configs=mw_configs, dataset_dir=dataset_path)
+    arch = zone_arch_config(deep)
 
     print("=" * 60)
-    print("TWO-STAGE TRAINING (ZoneAwareTwoStage: classifier + regressor)")
+    print(f"TWO-STAGE TRAINING (ZoneAwareTwoStage {arch['arch_label']}: classifier + regressor)")
     print("=" * 60)
     print(f"MW configs:    {mw_indices} ({len(mw_indices)}/{detect_num_mw_configs(dataset_path, synthetic)} channels)")
     if use_physics_loss:
         print(f"Physics-informed regressor: 1 A -> {CURRENT_TO_FIELD_MT_PER_A} mT (weight={physics_loss_weight})")
 
-    # ================= DATA ================= #
     train_base, val_base, test_base = stratified_zone_split(
         dataset_path, synthetic=synthetic, mw_indices=mw_indices,
         val_size=val_size, test_size=test_size,
@@ -365,14 +395,12 @@ def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=0)
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=0)
 
-    # ================= MODEL ================= #
     n_zones = int(zones.max() + 1)
-    # Set input shape based on dataset type
     n_freq = detect_n_freq(dataset_path, synthetic)
     n_channels = len(mw_indices)
-    model = models.ZoneAwareTwoStage(n_channels=n_channels, n_freq=n_freq, n_zones=n_zones, zone_emb_dim=32, output_dim=3).to(device)
+    model = arch['twostage_cls'](n_channels=n_channels, n_freq=n_freq, n_zones=n_zones, zone_emb_dim=32, output_dim=3).to(device)
     if pretrained_classifier:
-        classifier_path = os.path.join("models_trained", dataset_name, "zoneclassifier", "zoneclassifier_best_model.pth")
+        classifier_path = os.path.join("models_trained", dataset_name, arch['classifier_dir'], arch['classifier_ckpt'])
         classifier_state = torch.load(classifier_path, map_location=device)
         model.classifier.load_state_dict(classifier_state)
     criterion_cls = nn.CrossEntropyLoss()
@@ -387,7 +415,6 @@ def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg
 
     best_val_acc = 0.0
     best_cls_state = None
-    # --- History for plotting ---
     history = {
         'train_loss': [],
         'val_loss': [],
@@ -396,6 +423,9 @@ def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg
         'mae_az': [],
         'physics_loss': [],
     }
+    t_run_start = time.perf_counter()
+    t_cls_start = time.perf_counter()
+    cls_epochs_completed = 0
     for epoch in range(cls_epochs):
         # Train classifier
         model.train()
@@ -429,12 +459,12 @@ def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg
                 preds = logits.argmax(dim=1)
                 correct += (preds == zones_true).sum().item()
                 total += zones_true.size(0)
-                # For plotting, get regressor MAE (dummy, zeros)
+
                 abs_err_denorm += torch.zeros(3)
                 n_samples += signals.size(0)
         val_loss /= len(val_loader.dataset)
         val_acc = correct / total if total > 0 else 0.0
-        # For classifier stage, MAE is zeros
+
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
         history['mae_ax'].append(0.0)
@@ -450,12 +480,14 @@ def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             best_cls_state = model.state_dict()
-        
+
+        cls_epochs_completed = epoch + 1
         if early_stopping.step(val_acc, model):
             print(f"\n[TwoStage - Classifier] Early stopping at epoch {epoch+1}, best val acc = {early_stopping.best_metric*100:.2f}%")
             break
 
-    # Restore best classifier checkpoint before evaluation and stage 2
+    print_training_timing("TwoStage - Classifier", t_cls_start, cls_epochs_completed, cls_epochs)
+
     if best_cls_state is not None:
         model.load_state_dict(best_cls_state)
     elif early_stopping.best_state is not None:
@@ -492,6 +524,8 @@ def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg
     best_model_state = None
     freq_axis_Hz = get_frequency_axis(dataset_path)
 
+    t_reg_start = time.perf_counter()
+    reg_epochs_completed = 0
     for epoch in range(reg_epochs):
         # Train regressor (using predicted zones from classifier)
         model.train()
@@ -556,7 +590,6 @@ def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg
         mae_denorm = (abs_err_denorm / n_samples).tolist()
         val_mae_mean = np.mean(mae_denorm)
 
-        # Save best model based on MAE
         if val_mae_mean < best_val_mae:
             best_val_mae = val_mae_mean
             best_model_state = model.state_dict()
@@ -567,15 +600,18 @@ def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg
             phys_str = f" | Physics_loss: {physics_loss_val:.4f} (norm.)" if use_physics_loss else ""
             print(f"[TwoStage - Regressor] Epoch [{epoch+1:03d}/{reg_epochs}] | Val MAE (Ax,Ay,Az): ({mae_denorm[0]:.4f}, {mae_denorm[1]:.4f}, {mae_denorm[2]:.4f}){phys_str}\n")
 
+        reg_epochs_completed = epoch + 1
         if early_stopping.step(val_mae_mean, model):
             print(f"[TwoStage - Regressor] Early stopping at epoch {epoch+1}, best val MAE = {early_stopping.best_loss:.4f}")
             break
+
+    print_training_timing("TwoStage - Regressor", t_reg_start, reg_epochs_completed, reg_epochs)
+    print(f"[TwoStage] Total training time: {format_duration(time.perf_counter() - t_run_start)}")
 
     # Restore best model before test evaluation
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
 
-    # ===== Test evaluation ===== #
     model.eval()
     abs_err_denorm = torch.zeros(3, dtype=torch.float64)
     sq_err_denorm = torch.zeros(3, dtype=torch.float64)
@@ -617,12 +653,11 @@ def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg
     print(f"  RMSE Ax/Ay/Az: {rmse[0]:.4f} / {rmse[1]:.4f} / {rmse[2]:.4f} A")
     print(f"  Classifier accuracy on test set: {cls_acc_test*100:.2f}%")
 
-    # ===== Save model only if test MAE improves (global + per MW-count directories) ===== #
     test_mae_mean = np.mean(mae)
     for per_mw_count in (False, True):
-        model_dir = get_model_output_dir(dataset_name, "zoneawaretwostage", mw_indices, per_mw_count=per_mw_count)
+        model_dir = get_model_output_dir(dataset_name, arch['twostage_dir'], mw_indices, per_mw_count=per_mw_count)
         try_save_best_checkpoint(
-            model, model_dir, "zoneawaretwostage_best_model.pth", "best_test_mae.txt",
+            model, model_dir, arch['twostage_ckpt'], "best_test_mae.txt",
             test_mae_mean, higher_is_better=False,
         )
 
@@ -630,16 +665,17 @@ def train_two_stage(dataset_dir, batch_size, cls_epochs, reg_epochs, cls_lr, reg
 def train_two_stage_joint(dataset_dir, batch_size, epochs, cls_lr, reg_lr, cls_weight_decay, reg_weight_decay, patience, lambda_reg=1.0, synthetic=False, mw_configs=None,
                           val_size=0.10, test_size=0.10, balanced_val=True, val_samples_per_zone=None,
                           balanced_test=False, test_samples_per_zone=1,
-                          use_physics_loss=False, physics_loss_weight=0.1):
+                          use_physics_loss=False, physics_loss_weight=0.1, deep=False):
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dataset_path = resolve_dataset_path(dataset_dir)
     dataset_name = os.path.basename(dataset_path.rstrip("/\\"))
     zones, labels_mean, labels_std = compute_zones_for_dataset(dataset_path)
     mw_indices = resolve_mw_indices(synthetic=synthetic, mw_configs=mw_configs, dataset_dir=dataset_path)
+    arch = zone_arch_config(deep)
 
     print("="*60)
-    print("JOINT TRAINING (ZoneAwareTwoStage: classifier + regressor)")
+    print(f"JOINT TRAINING (ZoneAwareTwoStage {arch['arch_label']}: classifier + regressor)")
     print("="*60)
     print(f"MW configs:    {mw_indices} ({len(mw_indices)}/{detect_num_mw_configs(dataset_path, synthetic)} channels)")
     if use_physics_loss:
@@ -663,10 +699,9 @@ def train_two_stage_joint(dataset_dir, batch_size, epochs, cls_lr, reg_lr, cls_w
 
     # ===== MODEL ===== #
     n_zones = int(zones.max() + 1)
-    # Set input shape based on dataset type
     n_freq = detect_n_freq(dataset_path, synthetic)
     n_channels = len(mw_indices)
-    model = models.ZoneAwareTwoStage(n_channels=n_channels, n_freq=n_freq, n_zones=n_zones, zone_emb_dim=32, output_dim=3).to(device)
+    model = arch['twostage_cls'](n_channels=n_channels, n_freq=n_freq, n_zones=n_zones, zone_emb_dim=32, output_dim=3).to(device)
 
     criterion_cls = nn.CrossEntropyLoss()
     criterion_reg = nn.MSELoss()
@@ -682,6 +717,8 @@ def train_two_stage_joint(dataset_dir, batch_size, epochs, cls_lr, reg_lr, cls_w
     best_model_state = None
     freq_axis_Hz = get_frequency_axis(dataset_path)
 
+    t_train_start = time.perf_counter()
+    epochs_completed = 0
     for epoch in range(epochs):
         # ===== TRAIN ===== #
         model.train()
@@ -749,11 +786,11 @@ def train_two_stage_joint(dataset_dir, batch_size, epochs, cls_lr, reg_lr, cls_w
                 loss_total = loss_cls + lambda_reg * loss_reg
                 val_loss += loss_total.item() * signals.size(0)
 
-                # classification metrics
+
                 cls_correct_val += (zones_pred == zones_true).sum().item()
                 cls_total_val += zones_true.size(0)
 
-                # denormalized regression MAE
+
                 preds_denorm = denormalize_labels(preds.cpu(), labels_mean, labels_std)
                 labels_denorm = denormalize_labels(labels.cpu(), labels_mean, labels_std)
                 abs_err_denorm += torch.sum(torch.abs(preds_denorm - labels_denorm), dim=0)
@@ -764,7 +801,6 @@ def train_two_stage_joint(dataset_dir, batch_size, epochs, cls_lr, reg_lr, cls_w
         mae_denorm = (abs_err_denorm / n_samples).tolist()
         val_mae_mean = np.mean(mae_denorm)
 
-        # Save best model based on MAE
         if val_mae_mean < best_val_mae:
             best_val_mae = val_mae_mean
             best_model_state = model.state_dict()
@@ -777,9 +813,12 @@ def train_two_stage_joint(dataset_dir, batch_size, epochs, cls_lr, reg_lr, cls_w
                   f"Val MAE (Ax,Ay,Az): ({mae_denorm[0]:.4f}, {mae_denorm[1]:.4f}, {mae_denorm[2]:.4f}) | "
                   f"Val Classifier Acc: {cls_acc_val*100:.2f}%{phys_str}")
 
+        epochs_completed = epoch + 1
         if early_stopping.step(val_mae_mean, model):
             print(f"\n[TwoStageJoint] Early stopping at epoch {epoch+1}, best val MAE = {early_stopping.best_loss:.4f}")
             break
+
+    print_training_timing("TwoStageJoint", t_train_start, epochs_completed, epochs)
 
     # ===== RESTORE BEST MODEL ===== #
     if best_model_state is not None:
@@ -823,20 +862,19 @@ def train_two_stage_joint(dataset_dir, batch_size, epochs, cls_lr, reg_lr, cls_w
     print(f"  RMSE Ax/Ay/Az: {rmse[0]:.4f} / {rmse[1]:.4f} / {rmse[2]:.4f} A")
     print(f"  Classifier accuracy on test set: {cls_acc_test*100:.2f}%")
 
-    # ===== SAVE BEST MODEL BASED ON TEST MAE (global + per MW-count directories) ===== #
     test_mae_mean = np.mean(mae)
     print(f"\n[TwoStageJoint] Test MAE (mean over Ax/Ay/Az): {test_mae_mean:.4f} A")
     for per_mw_count in (False, True):
-        model_dir = get_model_output_dir(dataset_name, "zoneawaretwostage_joint", mw_indices, per_mw_count=per_mw_count)
+        model_dir = get_model_output_dir(dataset_name, arch['joint_dir'], mw_indices, per_mw_count=per_mw_count)
         try_save_best_checkpoint(
-            model, model_dir, "zoneawaretwostage_joint_best_model.pth", "best_test_mae.txt",
+            model, model_dir, arch['joint_ckpt'], "best_test_mae.txt",
             test_mae_mean, higher_is_better=False,
         )
 
-        
+
 def main():
     parser = argparse.ArgumentParser(description="Unified zone model training script")
-    parser.add_argument('--mode', choices=['classifier', 'regressor', 'two-stage', 'two-stage-joint'], required=True)
+    parser.add_argument('--model', choices=['classifier', 'regressor', 'two-stage', 'two-stage-joint', 'two-stage-joint-deep'], required=True)
     parser.add_argument('--dataset_dir', type=str, default='dataset_multi_mw_2')
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--epochs', type=int, default=200)
@@ -870,6 +908,7 @@ def main():
                         help='Proportional val/test per zone instead of homogeneous val')
     args = parser.parse_args()
 
+    t_run_start = time.perf_counter()
     synthetic = getattr(args, 'synthetic', False)
     split_kwargs = {
         'val_size': 0.10,
@@ -885,14 +924,18 @@ def main():
         'physics_loss_weight': args.physics_loss_weight,
     }
 
-    if args.mode == 'classifier':
+    if args.model == 'classifier':
         train_classifier(args.dataset_dir, args.batch_size, args.epochs, args.lr, args.weight_decay, args.patience, synthetic=synthetic, mw_configs=args.mw_configs, **split_kwargs)
-    elif args.mode == 'regressor':
+    elif args.model == 'regressor':
         train_regressor(args.dataset_dir, args.batch_size, args.epochs, args.lr, args.weight_decay, args.patience, synthetic=synthetic, mw_configs=args.mw_configs, **split_kwargs)
-    elif args.mode == 'two-stage':
+    elif args.model == 'two-stage':
         train_two_stage(args.dataset_dir, args.batch_size, args.cls_epochs, args.reg_epochs, args.cls_lr, args.reg_lr, args.cls_weight_decay, args.reg_weight_decay, args.cls_patience, args.reg_patience, args.pretrained_classifier, synthetic=synthetic, mw_configs=args.mw_configs, **split_kwargs, **physics_kwargs)
-    elif args.mode == 'two-stage-joint':
-        train_two_stage_joint(args.dataset_dir, args.batch_size, args.epochs, args.cls_lr, args.reg_lr, args.cls_weight_decay, args.reg_weight_decay, args.patience, lambda_reg=1.0, synthetic=synthetic, mw_configs=args.mw_configs, **split_kwargs, **physics_kwargs)
+    elif args.model == 'two-stage-joint':
+        train_two_stage_joint(args.dataset_dir, args.batch_size, args.epochs, args.cls_lr, args.reg_lr, args.cls_weight_decay, args.reg_weight_decay, args.patience, lambda_reg=1.0, synthetic=synthetic, mw_configs=args.mw_configs, deep=False, **split_kwargs, **physics_kwargs)
+    elif args.model == 'two-stage-joint-deep':
+        train_two_stage_joint(args.dataset_dir, args.batch_size, args.epochs, args.cls_lr, args.reg_lr, args.cls_weight_decay, args.reg_weight_decay, args.patience, lambda_reg=1.0, synthetic=synthetic, mw_configs=args.mw_configs, deep=True, **split_kwargs, **physics_kwargs)
+
+    print(f"\nTotal runtime: {format_duration(time.perf_counter() - t_run_start)}")
 
 if __name__ == '__main__':
     main()

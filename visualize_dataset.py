@@ -26,16 +26,15 @@ def plot_raw_dataset(dataset_dir, filter_spectra=False, filter_type='gaussian', 
     """
     Interactive visualization of raw SPLIT files from multi-MW dataset.
     Allows exploring raw signal/background data before preprocessing.
-    
+
     Parameters:
         dataset_dir : str
             Path to dataset_10ElliptConf directory
     """
     from pathlib import Path
-    
+
     dataset_dir = Path(dataset_dir)
-    
-    # Load currents — try real-dataset CSV first, fall back to metadata.csv
+
     currents_csv_list = list(dataset_dir.glob('3Dcurrents_sweep_*.csv'))
     if currents_csv_list:
         currents_data = pd.read_csv(currents_csv_list[0], header=None)
@@ -52,7 +51,7 @@ def plot_raw_dataset(dataset_dir, filter_spectra=False, filter_type='gaussian', 
         Ax = currents_data['Ax'].values
         Ay = currents_data['Ay'].values
         Az = currents_data['Az'].values
-    
+
     # Get all SPLIT files — if none exist, this is a numpy-format dataset
     split_files = sorted(dataset_dir.glob('*SPLIT*Raw.txt'))
     if len(split_files) == 0:
@@ -67,17 +66,16 @@ def plot_raw_dataset(dataset_dir, filter_spectra=False, filter_type='gaussian', 
         )
     num_experiments = len(split_files)
 
-    # Load first file to get structure
     data_first = np.loadtxt(split_files[0], delimiter='\t')
     frequencies, signals_raw, backgrounds_raw = extract_signals_and_backgrounds(data_first)
-    
+
     # Create figure
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
     plt.subplots_adjust(bottom=0.25, hspace=0.3)
-    
+
     # Initial experiment
     exp_id = 0
-    
+
     # Plot first measurement of each type
     line1, = ax1.plot(frequencies, signals_raw[0, :], 'b-', label='Signal (meas 0)')
     line1b, = ax1.plot(frequencies, backgrounds_raw[0, :], 'r-', alpha=0.5, label='Background (meas 0)')
@@ -85,14 +83,14 @@ def plot_raw_dataset(dataset_dir, filter_spectra=False, filter_type='gaussian', 
     ax1.set_title(f'Exp {exp_id} — Raw Signal & Background — Ax={Ax[exp_id]:.2f} A, Ay={Ay[exp_id]:.2f} A, Az={Az[exp_id]:.2f} A')
     ax1.grid(True, alpha=0.3)
     ax1.legend()
-    
+
     # Plot normalized (signal/background)
     normalized = signals_raw[0, :] / backgrounds_raw[0, :]
     line2, = ax2.plot(frequencies, normalized, 'g-')
     ax2.set_ylabel('Signal / Background')
     ax2.set_title('Normalized (S/B)')
     ax2.grid(True, alpha=0.3)
-    
+
     # Create sliders and checkbox
     ax_exp = plt.axes([0.15, 0.12, 0.7, 0.03])
     ax_meas = plt.axes([0.15, 0.06, 0.7, 0.03])
@@ -133,7 +131,7 @@ def plot_raw_dataset(dataset_dir, filter_spectra=False, filter_type='gaussian', 
         else:
             return normed
 
-    
+
     # Update function
     def update(val=None):
         exp_id = int(slider_exp.val)
@@ -168,7 +166,7 @@ def plot_raw_dataset(dataset_dir, filter_spectra=False, filter_type='gaussian', 
 def plot_pytorch_dataset(dataset_dir, peak_extraction=False):
     """
     Interactive visualization of PyTorch dataset.
-    
+
     Parameters:
         dataset_dir : str
             Path to the PyTorch dataset directory containing:
@@ -176,19 +174,28 @@ def plot_pytorch_dataset(dataset_dir, peak_extraction=False):
             - metadata.csv
             - signals/ folder with config_XXX.npy files
     """
-    # Load dataset components
     frequencies = np.load(os.path.join(dataset_dir, "frequencies.npy"))
     metadata = pd.read_csv(os.path.join(dataset_dir, "metadata.csv"))
-    
+
     num_configs = len(metadata)
     Ax = metadata["Ax"].values
     Ay = metadata["Ay"].values
     Az = metadata["Az"].values
-    
-    # Load first config to get shape
+    has_scale = "channel_scale" in metadata.columns
+    channel_scales = metadata["channel_scale"].values if has_scale else None
+
+    def _exp_subtitle(exp_id, mw_id):
+        parts = [f"Experiment {exp_id}, MW angle {mw_id}"]
+        if channel_scales is not None:
+            parts.append(f"channel scale={channel_scales[exp_id]:.2f}")
+        if not has_scale or (Ax[exp_id] == 0 and Ay[exp_id] == 0 and Az[exp_id] == 0):
+            return " — ".join(parts)
+        parts.append(f"Ax={Ax[exp_id]:.2f} A, Ay={Ay[exp_id]:.2f} A, Az={Az[exp_id]:.2f} A")
+        return " — ".join(parts)
+
     first_signal = np.load(os.path.join(dataset_dir, "signals", "config_0000.npy"))
     num_mw_configs = first_signal.shape[0]  # (num_mw_configs, num_freq) - should be 10
-    
+
     # Determine units for plotting (assume Hz if max is large)
     if np.max(frequencies) > 1e6:
         freq_plot = frequencies / 1e9  # Hz → GHz
@@ -198,7 +205,7 @@ def plot_pytorch_dataset(dataset_dir, peak_extraction=False):
     # Create figure with sliders
     fig, ax = plt.subplots(figsize=(12, 7))
     plt.subplots_adjust(bottom=0.25)
-    
+
     # Initial plot (experiment=0, mw_config=0)
     spectrum0 = first_signal[0, :]
     line, = ax.plot(freq_plot, spectrum0, 'b-', label='Spectrum')
@@ -207,7 +214,7 @@ def plot_pytorch_dataset(dataset_dir, peak_extraction=False):
     peak_scatter = None
     if peak_extraction:
         peak_freqs0 = extract_odmr_peak_frequencies(spectrum0, frequencies)
-        # Convert peak frequencies to plotting units (GHz)
+
         if np.max(frequencies) > 1e6:
             peak_x0 = np.array(peak_freqs0) / 1e9
         else:
@@ -219,23 +226,22 @@ def plot_pytorch_dataset(dataset_dir, peak_extraction=False):
 
     ax.set_xlabel('Frequency (GHz)', fontsize=12)
     ax.set_ylabel('Normalized Signal (a.u.)', fontsize=12)
-    ax.set_title('PyTorch Dataset — Experiment 0, MW config 0 — Currents: Ax=%.2f A, Ay=%.2f A, Az=%.2f A' % (Ax[0], Ay[0], Az[0]))
+    ax.set_title('PyTorch Dataset — ' + _exp_subtitle(0, 0))
     ax.legend()
     ax.grid(True, alpha=0.3)
-    
+
     # Create sliders
     ax_exp = plt.axes([0.15, 0.12, 0.7, 0.03])
     ax_mw = plt.axes([0.15, 0.06, 0.7, 0.03])
-    
+
     slider_exp = Slider(ax_exp, 'Experiment', 0, num_configs - 1, valinit=0, valstep=1)
     slider_mw = Slider(ax_mw, 'MW config', 0, num_mw_configs - 1, valinit=0, valstep=1)
-    
+
     # Update function
     def update(val=None):
         exp_id = int(slider_exp.val)
         mw_id = int(slider_mw.val)
-        
-        # Load the signal file for this experiment
+
         signal_file = os.path.join(dataset_dir, "signals", f"config_{exp_id:04d}.npy")
         signals = np.load(signal_file)  # (num_mw_configs, num_freq) - (10, 201)
         spectrum = signals[mw_id, :]
@@ -255,18 +261,17 @@ def plot_pytorch_dataset(dataset_dir, peak_extraction=False):
             valid = ~np.isnan(peak_x) & ~np.isnan(peak_y)
             peak_scatter.set_offsets(np.c_[peak_x[valid], peak_y[valid]])
 
-        ax.set_title(f'PyTorch Dataset — Experiment {exp_id}, MW config {mw_id} — '
-                    f'Currents: Ax={Ax[exp_id]:.2f} A, Ay={Ay[exp_id]:.2f} A, Az={Az[exp_id]:.2f} A')
-        
+        ax.set_title('PyTorch Dataset — ' + _exp_subtitle(exp_id, mw_id))
+
         # Auto-scale y-axis
         ax.relim()
         ax.autoscale_view(scalex=False, scaley=True)
         fig.canvas.draw_idle()
-    
+
     # Connect sliders
     slider_exp.on_changed(update)
     slider_mw.on_changed(update)
-    
+
     plt.show()
 
 

@@ -1,27 +1,5 @@
-"""
-Normalize a raw synthetic ODMR dataset produced by build_synthetic_dataset.py.
+"""Normalize a raw synthetic ODMR dataset for training."""
 
-Applies exactly the same normalization strategy as prepare_pytorch_dataset.py:
-  - Signals : global standardization  (signals - mean) / std  over the full array
-  - Labels  : (value - mean) / max_std  where max_std = max(std_Ax, std_Ay, std_Az)
-
-Reads from a raw dataset directory and writes a normalized copy ready for training.
-
-Output structure (identical to prepare_pytorch_dataset.py):
-    <output_dir>/
-    ├── metadata.csv             # experiment_id, Ax, Ay, Az  (normalized)
-    ├── frequencies.npy          # copied from raw dataset
-    ├── normalization_stats.npy  # {'labels_mean': (3,), 'labels_std': (3,)}
-    └── signals/
-        ├── config_0000.npy      # (n_mw_configs, Wnr)  normalized
-        └── ...
-
-Usage:
-    cd synthetical_data
-    python normalize_synthetic_dataset.py \\
-        --input_dir  ../datasets_synthetic/synthetic_multi_mw_raw \\
-        --output_dir ../datasets_pytorch/synthetic_multi_mw
-"""
 
 import argparse
 import shutil
@@ -41,16 +19,13 @@ def normalize_dataset(input_dir: str, output_dir: str) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     signals_out.mkdir(exist_ok=True)
 
-    # ---- Discover signal files -----------------------------------------------
     signal_files = sorted(signals_in.glob("config_*.npy"))
     n_samples    = len(signal_files)
     if n_samples == 0:
         raise FileNotFoundError(f"No config_*.npy files found in {signals_in}")
 
-    # ---- Load raw metadata ---------------------------------------------------
     meta = pd.read_csv(input_dir / "metadata.csv")
 
-    # ---- Load all signals into memory to compute global stats ----------------
     print(f"Loading {n_samples} signal files for global normalization …")
     sample = np.load(signal_files[0])          # (n_mw, Wnr)
     n_mw, Wnr = sample.shape
@@ -58,12 +33,10 @@ def normalize_dataset(input_dir: str, output_dir: str) -> None:
     for i, fpath in enumerate(tqdm(signal_files, desc="  loading")):
         all_signals[i] = np.load(fpath)
 
-    # ---- Global signal normalization (same as prepare_pytorch_dataset.py) ----
     sig_mean = float(all_signals.mean())
     sig_std  = float(all_signals.std())
     all_signals = ((all_signals - sig_mean) / (sig_std + 1e-8)).astype(np.float32)
 
-    # ---- Label normalization stats -------------------------------------------
     ax_vals = meta["Ax"].values.astype(np.float64)
     ay_vals = meta["Ay"].values.astype(np.float64)
     az_vals = meta["Az"].values.astype(np.float64)
@@ -76,7 +49,6 @@ def normalize_dataset(input_dir: str, output_dir: str) -> None:
     normalization_stats = {"labels_mean": labels_mean, "labels_std": labels_std}
     np.save(output_dir / "normalization_stats.npy", normalization_stats)
 
-    # ---- Normalize labels ----------------------------------------------------
     ax_norm = (ax_vals - labels_mean[0]) / (labels_std[0] + 1e-8)
     ay_norm = (ay_vals - labels_mean[1]) / (labels_std[1] + 1e-8)
     az_norm = (az_vals - labels_mean[2]) / (labels_std[2] + 1e-8)
@@ -89,15 +61,12 @@ def normalize_dataset(input_dir: str, output_dir: str) -> None:
     })
     norm_meta.to_csv(output_dir / "metadata.csv", index=False)
 
-    # ---- Copy frequencies ----------------------------------------------------
     shutil.copy2(input_dir / "frequencies.npy", output_dir / "frequencies.npy")
 
-    # ---- Save normalized signal files ----------------------------------------
     print("Saving normalized signal files …")
     for exp_id in tqdm(range(n_samples)):
         np.save(signals_out / f"config_{exp_id:04d}.npy", all_signals[exp_id])
 
-    # ---- Summary -------------------------------------------------------------
     print(f"\n{'='*60}")
     print("Normalization complete.")
     print(f"{'='*60}")

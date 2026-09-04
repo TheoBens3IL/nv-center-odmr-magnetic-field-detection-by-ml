@@ -3,8 +3,6 @@ import matplotlib.pyplot as plt
 from scipy.linalg import expm
 
 # Global parameters
-# Wstart = 2.7e3
-# Wend = 3.05e3
 Wstart = 2.77e3
 Wend = 2.97e3
 Wnr = 201
@@ -52,7 +50,6 @@ def single_nv_spectrum(Bz, phase, Ox, coef_x, Oy, coef_y, freq_list=None):
     pops = np.array(pops)
     return pops / np.max(pops)
 
-# --- Rotation and Transformation Functions ---
 def rot_x(alpha):
     c, s = np.cos(alpha), np.sin(alpha)
     return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
@@ -114,7 +111,6 @@ def ensemble_spectrum(B, MW_field, MW_phase, freq_list=None, tilt_x=0, tilt_y=0)
     return EnsCont
 
 
-# Test and plot
 if __name__ == "__main__":
     import time
     freqList = np.linspace(Wstart, Wend, Wnr)

@@ -5,7 +5,7 @@ from evaluate import load_model, get_test_loader, evaluate_cnn, evaluate_regress
 
 MODELS_ROOT = "models_trained"
 DATASET = "dataset_multi_mw_2"
-MODEL_NAMES = ["ODMR_CNN", "ODMR_CNN_Compact", "ODMR_CNN_Deep", "FrequencyAttention", "MWConfig_CNN", "HybridODMRPredictor"]
+MODEL_NAMES = ["ODMR_CNN", "ODMR_CNN_Compact", "ODMR_CNN_Deep", "FrequencyAttention", "MWConfig_CNN", "AxisSplitRegressor"]
 
 results = {}
 
@@ -19,7 +19,6 @@ for model_name in MODEL_NAMES:
     dataset_dir = os.path.join("datasets_pytorch", DATASET)
     test_loader, labels_mean, labels_std = get_test_loader(dataset_dir, model_name, batch_size=64)
     model = load_model(model_name, model_dir, dataset_dir, device=device)
-    # Choose evaluation function based on model type
     if model_name.lower() == 'zoneawareregressor':
         y_pred, y_true, _ = evaluate_regressor(model, test_loader, device=device)
     elif model_name.lower() == 'zoneawaretwostage' or model_name.lower() == 'zoneawaretwostage_joint':
@@ -29,7 +28,6 @@ for model_name in MODEL_NAMES:
     metrics = compute_metrics(y_pred, y_true, labels_mean, labels_std)
     results[model_name] = metrics
 
-# Print comparative results by MAE for Ax, Ay, Az and their mean
 print("\n====================== COMPARAISON DES MAE (A) =====================")
 header = ["Model", "MAE_Ax", "MAE_Ay", "MAE_Az", "MAE_Mean"]
 print("| {:<20} | {:>8} | {:>8} | {:>8} | {:>8} |".format(*header))
@@ -46,12 +44,10 @@ for model_name, metrics in results.items():
         print(f"[WARN] Could not extract MAE for {model_name}: {e}")
         continue
 
-# Sort by MAE_Mean
 mae_table.sort(key=lambda x: x[4])
 for row in mae_table:
     print("| {:<20} | {:>8.3f} | {:>8.3f} | {:>8.3f} | {:>8.3f} |".format(*row))
 
-# Save results to JSON
 output_path = os.path.join(MODELS_ROOT, DATASET, "comparative_evaluation.json")
 with open(output_path, 'w') as f:
     json.dump(results, f, indent=2)

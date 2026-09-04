@@ -7,6 +7,7 @@ import torch
 from pathlib import Path
 import os
 import json
+import time
 import pandas as pd
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
@@ -46,40 +47,42 @@ class EarlyStopping:
         return self.best_metric
 
 
+def format_duration(seconds):
+    """Format a duration in seconds for training logs."""
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{seconds:.1f} s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{int(minutes)} min {secs:.1f} s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{int(hours)} h {int(minutes)} min {secs:.0f} s"
+
+
+def print_training_timing(label, start_time, epochs_completed, max_epochs):
+    """Print elapsed training time and average time per epoch."""
+    elapsed = time.perf_counter() - start_time
+    if epochs_completed > 0:
+        per_epoch = format_duration(elapsed / epochs_completed)
+        epoch_part = f"{epochs_completed}/{max_epochs} epochs, ~{per_epoch}/epoch"
+    else:
+        epoch_part = f"0/{max_epochs} epochs"
+    print(f"[{label}] Training time: {format_duration(elapsed)} ({epoch_part})")
+    return elapsed
+
+
 def load_normalization_stats(dataset_dir):
-    """
-    Load label normalization statistics from dataset.
-    
-    Parameters:
-        dataset_dir : str or Path
-            Path to dataset directory
-             
-    Returns:
-        dict with keys 'labels_mean' and 'labels_std'
-    """
+    """Load label normalization statistics from normalization_stats.npy."""
     stats_path = Path(dataset_dir) / 'normalization_stats.npy'
     if not stats_path.exists():
         raise FileNotFoundError(f"Normalization stats not found at {stats_path}")
-    
+
     stats = np.load(stats_path, allow_pickle=True).item()
     return stats
 
 
 def denormalize_labels(labels_norm, labels_mean, labels_std):
-    """
-    Denormalize labels back to original scale.
-    
-    Parameters:
-        labels_norm : array or tensor (N, 3)
-            Normalized labels (Ax, Ay, Az)
-        labels_mean : array (3,)
-            Mean used for normalization
-        labels_std : array (3,)
-            Std used for normalization
-            
-    Returns:
-        Denormalized labels in original scale
-    """
+    """Denormalize (Ax, Ay, Az) labels back to physical units."""
     if isinstance(labels_norm, torch.Tensor):
         labels_mean = torch.tensor(labels_mean, device=labels_norm.device, dtype=labels_norm.dtype)
         labels_std = torch.tensor(labels_std, device=labels_norm.device, dtype=labels_norm.dtype)
@@ -148,17 +151,26 @@ def mw_count_subdir(mw_indices):
 
 def resolve_model_output_dir(dataset_dir, model_name, mw_indices):
     """
-    Locate trained model artifacts for a dataset / MW selection.
+    Locate trained model artifacts for a dataset and MW config selection.
 
     Prefers models_trained/<dataset>/<N>mw/<model>/ when present, otherwise
     falls back to models_trained/<dataset>/<model>/.
     """
     dataset_name = Path(dataset_dir).name
-    per_count_dir = get_model_output_dir(dataset_name, model_name, mw_indices, per_mw_count=True)
-    global_dir = get_model_output_dir(dataset_name, model_name, mw_indices, per_mw_count=False)
-    if per_count_dir.exists():
-        return per_count_dir
-    return global_dir
+    model_key = model_name.lower()
+    legacy_keys = {
+        'zoneawaretwostagejoint': ['zoneawaretwostage_joint'],
+        'zoneawaretwostagejointdeep': ['zoneawaretwostage_joint2'],
+    }
+    candidates = [model_key] + legacy_keys.get(model_key, [])
+    for key in candidates:
+        per_count_dir = get_model_output_dir(dataset_name, key, mw_indices, per_mw_count=True)
+        global_dir = get_model_output_dir(dataset_name, key, mw_indices, per_mw_count=False)
+        if per_count_dir.exists():
+            return per_count_dir
+        if global_dir.exists():
+            return global_dir
+    return get_model_output_dir(dataset_name, model_key, mw_indices, per_mw_count=False)
 
 
 def get_model_output_dir(dataset_dir, model_name, mw_indices=None, per_mw_count=False):
@@ -166,7 +178,7 @@ def get_model_output_dir(dataset_dir, model_name, mw_indices=None, per_mw_count=
     Return output directory for trained model artifacts.
 
     Global (default): models_trained/<dataset>/<model>/
-    Per MW count:      models_trained/<dataset>/<N>mw/<model>/
+    Per MW count:     models_trained/<dataset>/<N>mw/<model>/
     """
     base = Path("models_trained") / Path(dataset_dir)
     if per_mw_count and mw_indices is not None:
@@ -231,6 +243,7 @@ def save_cnn_training_run_if_improved(
     use_physics_loss,
     physics_loss_weight,
     plot_training_history_fn,
+    test_mae_mean=None,
 ):
     """Save CNN training artifacts if validation MAE improved for this output directory."""
     from datetime import datetime
@@ -253,6 +266,8 @@ def save_cnn_training_run_if_improved(
 
     torch.save(model.state_dict(), model_path)
     print(f"Best model saved as {model_path} (MAE: {metric_value:.4f})")
+    if test_mae_mean is not None:
+        (model_dir / "best_test_mae.txt").write_text(str(test_mae_mean))
 
     fig = plot_training_history_fn(history, label_names=label_names, show=False)
     fig.savefig(plot_path, dpi=150, bbox_inches='tight')
@@ -276,6 +291,7 @@ def save_cnn_training_run_if_improved(
         'train_loss': round(float(history['train_loss'][-1]), 3),
         'metrics': {
             'mae': [round(float(v), 4) for v in current_mae],
+            'test_mae_mean': round(float(test_mae_mean), 6) if test_mae_mean is not None else None,
             'physics_loss': round(float(history['physics_loss'][-1]), 4) if use_physics_loss else None,
         },
     }
@@ -299,41 +315,9 @@ def nv_axes():
     return axes / np.linalg.norm(axes, axis=1, keepdims=True)
 
 
-# def compute_direction_zones(vectors, nv_axes=nv_axes()):
-#     """
-#     Partition vectors by NV peak ordering.
-#     Each vector is projected onto the 4 NV axes, the order of projections is used as a configuration string.
-#     Each unique ordering is mapped to a unique zone index.
-#     Parameters:
-#         vectors: array-like (..., 3)
-#         nv_axes: array-like (4, 3), NV axes (defaults to diamond <111> directions)
-#     Returns:
-#         zones: ndarray of shape (...,) with integer zone indices
-#     """
-#     v = np.asarray(vectors, dtype=np.float64)
-#     if nv_axes is None:
-#         nv_axes = np.array([
-#             [1, -1, 1],
-#             [-1, 1, 1],
-#             [-1, -1, -1],
-#             [1, 1, -1]
-#         ], dtype=np.float64)
-#         nv_axes = nv_axes / np.linalg.norm(nv_axes, axis=1, keepdims=True)
-#     # Project each vector onto NV axes
-#     projections = np.dot(v, nv_axes.T)  # e.g [[0.1, 0.2, 0.5, 0.8], [0.5, 0.4, 0.6, 0.7], [0.6, 0.3, 0.2, 0.1]] 
-#     # For each vector, get the order of projections (descending)
-#     orderings = np.argsort(-projections, axis=1)  # e.g [[3, 2, 1, 0], [3, 2, 0, 1], [0, 1, 2, 3]]
-#     # Convert ordering to string for unique config
-#     configs = [''.join(map(str, ordering)) for ordering in orderings] # e.g ['3210', '3201', '0123']
-#     # Map each unique config to a zone index
-#     unique_configs = sorted(set(configs)) # e.g ['0123', '3201', '3210']
-#     config_to_zone = {cfg: idx for idx, cfg in enumerate(unique_configs)} # e.g {'0123': 0, '3201': 1, '3210': 2}
-#     zones = np.array([config_to_zone[cfg] for cfg in configs], dtype=np.int64) # e.g [0, 1, 2]
-#     return zones
-
-
 def split_zones(vectors, nv_axes=nv_axes()):
     """
+    Map (Ax, Ay, Az) vectors to one of 48 NV-ordering zones.
     Partition vectors by NV peak ordering :
     - Each vector is projected onto the 4 NV axes (p_i = B·n_i)
     - Ordering by descending projection magnitude p_i (24 possibilities)
@@ -371,12 +355,13 @@ def split_zones(vectors, nv_axes=nv_axes()):
     return zones.astype(np.int64)
 
 
-def compute_zones_for_dataset(dataset_dir):
+def compute_zones_for_dataset(dataset_dir, current_offset_amp=None):
     """
     Compute per-experiment zone indices from normalized labels in metadata.csv.
     This is a convenience helper used by some training scripts. It:
     - loads metadata.csv,
     - denormalizes label columns using normalization_stats.npy,
+    - optionally subtracts zero-field current offset (see apply_zero_field_offset.py),
     - maps each (Ax,Ay,Az) to one of the 48 cubic-symmetry zones.
     """
     metadata_path = os.path.join(dataset_dir, "metadata.csv")
@@ -392,6 +377,9 @@ def compute_zones_for_dataset(dataset_dir):
         raise ValueError("metadata.csv must contain Ax/Ay/Az columns.")
     labels_norm = metadata[label_cols].values.astype(np.float32)
     labels_denorm = denormalize_labels(labels_norm, labels_mean, labels_std)
+    if current_offset_amp is not None:
+        from apply_zero_field_offset import correct_measured_currents
+        labels_denorm = correct_measured_currents(labels_denorm, current_offset_amp)
     zones = split_zones(labels_denorm)
 
     return zones, labels_mean, labels_std
@@ -446,18 +434,7 @@ def visualize_sphere_zones_surface(n_theta=100, n_phi=100, same_config_same_colo
 
 
 def visualize_dataset_vectors_on_sphere(dataset_dir):
-    """
-    Visualize dataset B-vector directions coloured by zone, in two complementary views.
-
-    Left  — physical space: scatter of (Ax, Ay, Az) at their actual magnitudes.
-            Shows the full distribution in current/field space.
-    Right — unit sphere: each vector projected onto the unit sphere with a
-            wireframe for reference.  Shows angular (directional) coverage
-            independently of magnitude — useful to spot missing zones.
-
-    Both panels use the same zone colour coding.
-    Also prints per-zone sample counts to the console.
-    """
+    """Plot dataset B-vectors coloured by zone (physical space and unit sphere)."""
     metadata_path = os.path.join(dataset_dir, 'metadata.csv')
     if not os.path.exists(metadata_path):
         raise FileNotFoundError(f"metadata.csv not found in {dataset_dir}")
@@ -511,19 +488,7 @@ def visualize_dataset_vectors_on_sphere(dataset_dir):
 
 
 def visualize_zone_sample_counts(dataset_dir, n_theta=100, n_phi=100):
-    """
-    Show how many dataset samples fall in each of the 48 sphere zones.
-
-    Produces a two-panel figure:
-      Left  — 3D sphere surface coloured by per-zone sample count (viridis).
-      Right — 2D heatmap with axes that reflect the zone structure:
-                rows   = ordering index (0..23, the 24 NV-axis ranking permutations)
-                columns= sign bit (0 = B toward dominant axis, 1 = away)
-              This layout directly mirrors zone = ordering_idx * 2 + sign_bit.
-
-    Also prints per-zone counts to the console.
-    """
-    # --- load and denormalize labels ---
+    """Show per-zone sample counts on a 3D sphere and 2D heatmap."""
     metadata_path = os.path.join(dataset_dir, 'metadata.csv')
     if not os.path.exists(metadata_path):
         raise FileNotFoundError(f"metadata.csv not found in {dataset_dir}")
@@ -538,10 +503,9 @@ def visualize_zone_sample_counts(dataset_dir, n_theta=100, n_phi=100):
             norm_stats["labels_mean"], norm_stats["labels_std"],
         )
     else:
-        # Raw physical labels (e.g. build_synthetic_dataset output before normalization)
+
         labels_denorm = metadata[['Ax', 'Ay', 'Az']].values.astype(np.float64)
 
-    # --- count samples per zone ---
     n_zones = 48
     dataset_zones = split_zones(labels_denorm)
     zone_counts = np.bincount(dataset_zones, minlength=n_zones)  # shape (48,)
@@ -551,7 +515,7 @@ def visualize_zone_sample_counts(dataset_dir, n_theta=100, n_phi=100):
     for z in range(n_zones):
         print(f"  Zone {z:2d}: {zone_counts[z]} samples")
 
-    # --- 3D sphere: colour each surface patch by its zone's sample count ---
+    # 3D sphere: colour each surface patch by its zone's sample count
     theta = np.linspace(0, np.pi, n_theta)
     phi   = np.linspace(0, 2 * np.pi, n_phi)
     Theta, Phi = np.meshgrid(theta, phi)
@@ -561,16 +525,14 @@ def visualize_zone_sample_counts(dataset_dir, n_theta=100, n_phi=100):
 
     sphere_dirs  = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
     sphere_zones = split_zones(sphere_dirs).reshape(Phi.shape)
-    count_grid   = zone_counts[sphere_zones]          # broadcast lookup
+    count_grid   = zone_counts[sphere_zones]
 
     cmap_sphere = plt.get_cmap('viridis')
     norm_sphere = plt.Normalize(count_grid.min(), count_grid.max())
 
-    # --- 2D heatmap: ordering_idx (rows 0..23) × sign_bit (cols 0..1) ---
-    # zone = ordering_idx * 2 + sign_bit  →  reshape to (24, 2)
+
     heatmap = zone_counts.reshape(24, 2)
 
-    # --- plot ---
     fig = plt.figure(figsize=(16, 7))
     fig.suptitle(f'Sample counts per zone — {dataset_dir}', fontsize=13)
 
@@ -606,20 +568,7 @@ def visualize_zone_sample_counts(dataset_dir, n_theta=100, n_phi=100):
 
 
 def compute_zone_mae(y_pred, y_true, labels_mean, labels_std, zones=None, axis='mean', n_zones=48):
-    """
-    Compute mean absolute error per sphere zone on a test set.
-
-    Args:
-        y_pred, y_true: model outputs and targets (normalized)
-        labels_mean, labels_std: denormalization stats
-        zones: optional zone indices per sample; if None, zones are inferred from true B-field
-        axis: 'mean' (avg over Ax,Ay,Az) or 'Ax' / 'Ay' / 'Az'
-        n_zones: number of zones (48 by default)
-
-    Returns:
-        zone_mae: array (n_zones,) with NaN for zones without test samples
-        zones_np: zone index per sample
-    """
+    """Compute mean absolute error per sphere zone on a test set."""
     y_pred_denorm = denormalize_labels(y_pred, labels_mean, labels_std)
     y_true_denorm = denormalize_labels(y_true, labels_mean, labels_std)
     if hasattr(y_pred_denorm, 'numpy'):
@@ -658,14 +607,7 @@ def plot_zone_mae_on_sphere(
     y_pred, y_true, labels_mean, labels_std, zones=None,
     axis='mean', n_theta=100, n_phi=100, title=None, save_path=None, show=True,
 ):
-    """
-    Visualize per-zone MAE on the unit sphere and as a structured 2D heatmap.
-
-    Left  — 3D sphere coloured by mean MAE in each zone (viridis).
-    Right — 2D heatmap (24 ordering indices × 2 sign bits), mirroring zone = ordering*2 + sign.
-
-    Zones with no test samples appear in grey on the sphere and as empty cells in the heatmap.
-    """
+    """Visualize per-zone MAE on the unit sphere and as a 2D heatmap."""
     zone_mae, zones_np = compute_zone_mae(
         y_pred, y_true, labels_mean, labels_std, zones=zones, axis=axis,
     )
@@ -742,12 +684,7 @@ def plot_zone_mae_on_sphere(
 
 
 def select_extreme_zones(zone_mae, zones_np, min_samples=1):
-    """
-    Pick best (lowest MAE) and worst (highest MAE) zones — same criterion as the sphere heatmap.
-
-    Args:
-        min_samples: minimum test samples in a zone to be eligible (default 1 = match sphere extrema)
-    """
+    """Pick best and worst zones by mean test MAE."""
     counts = np.bincount(zones_np, minlength=len(zone_mae))
     eligible = [
         z for z in range(len(zone_mae))
@@ -785,11 +722,7 @@ def plot_extreme_zone_signals(
     save_path=None,
     show=True,
 ):
-    """
-    Compare ODMR spectra between the best- and worst-performing zones (by mean test MAE).
-
-    For each zone, plots the first test sample only (one spectrum per MW config).
-    """
+    """Compare ODMR spectra between best- and worst-performing zones."""
     if hasattr(signals, 'numpy'):
         signals = signals.numpy()
     zone_mae, zones_np = compute_zone_mae(
@@ -876,7 +809,27 @@ def plot_extreme_zone_signals(
     return fig, best_zone, worst_zone
 
 
+def _resolve_dataset_dir(dataset_dir):
+    """Resolve bare name or path to a PyTorch dataset folder."""
+    path = Path(dataset_dir)
+    candidates = [path]
+    if not path.is_absolute() and not str(path).replace("\\", "/").startswith("datasets_pytorch"):
+        candidates.append(Path("datasets_pytorch") / dataset_dir)
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if (resolved / "metadata.csv").is_file():
+            return str(resolved)
+    tried = ", ".join(str(c.resolve()) for c in candidates)
+    raise FileNotFoundError(f"Dataset not found (no metadata.csv). Tried: {tried}")
+
+
 if __name__ == "__main__":
-    # visualize_sphere_zones_surface()
-    visualize_zone_sample_counts(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
-    # visualize_dataset_vectors_on_sphere(dataset_dir="datasets_pytorch/dataset_multi_mw_2")
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Visualize ODMR dataset zone distribution.")
+    parser.add_argument("--dataset_dir", type=str, default="dataset_multi_mw_2", help="PyTorch dataset name or path (default: dataset_multi_mw_2 in datasets_pytorch/)")
+    args = parser.parse_args()
+    dataset_path = _resolve_dataset_dir(args.dataset_dir)
+
+    visualize_zone_sample_counts(dataset_dir=dataset_path)
+    visualize_dataset_vectors_on_sphere(dataset_dir=dataset_path)

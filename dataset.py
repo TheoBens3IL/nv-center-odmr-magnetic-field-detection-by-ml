@@ -9,9 +9,9 @@ from collections import defaultdict
 from utils import compute_zones_for_dataset
 
 
-class ODMRDatasetMultiConfig(Dataset):
+class ODMRDataset(Dataset):
     """
-    PyTorch Dataset for ODMR signals that returns all 10 MW configurations together.
+    PyTorch Dataset returning all MW configs and (Ax, Ay, Az) labels per sample
 
     Each item:
         X : Tensor (10, N_freq) → all MW configurations as channels
@@ -19,12 +19,10 @@ class ODMRDatasetMultiConfig(Dataset):
     """
 
     def __init__(self, dataset_dir, transform=None):
-        # Initialize dataset paths and load metadata
         self.dataset_dir = os.path.abspath(dataset_dir)
         self.signals_dir = os.path.join(self.dataset_dir, "signals")
         self.metadata = pd.read_csv(os.path.join(self.dataset_dir, "metadata.csv"))
         self.transform = transform
-        # Detect label columns
         if 'Ax' in self.metadata.columns:
             self.label_cols = ['Ax', 'Ay', 'Az']
         else:
@@ -34,33 +32,20 @@ class ODMRDatasetMultiConfig(Dataset):
         return len(self.metadata)
 
     def __getitem__(self, idx):
-        '''
-        Get all MW configurations and label for a given experiment.
-        Returns:
-            spectrum: Tensor of shape (10, N_freq) - all MW configs as channels
-            label: Tensor of shape (3,) corresponding to (Ax, Ay, Az)
-        '''
         row = self.metadata.iloc[idx]
         config_id = int(row["experiment_id"])
 
-        # Load all 10 MW configurations for this experiment
-        signals = np.load(os.path.join(self.signals_dir, f"config_{config_id:04d}.npy"))  # (10, 201)
+        signals = np.load(os.path.join(self.signals_dir, f"config_{config_id:04d}.npy"))
 
-        spectrum = torch.from_numpy(signals).float()  # (10, N_freq)
+        spectrum = torch.from_numpy(signals).float()
 
         label = torch.tensor([row[self.label_cols[0]], row[self.label_cols[1]], row[self.label_cols[2]]], dtype=torch.float32)
 
         return spectrum, label
 
 
-# New: Dataset for synthetic data (5 MW configs, 400 freq)
 class ODMRDatasetSynthetic(Dataset):
-    """
-    PyTorch Dataset for synthetic ODMR signals (5 MW configs, 400 freq).
-    Each item:
-        X : Tensor (5, 400)
-        y : Tensor (3,)
-    """
+    """PyTorch Dataset for synthetic ODMR signals (5 MW configs, 400 freq)."""
     def __init__(self, dataset_dir, transform=None):
         self.dataset_dir = os.path.abspath(dataset_dir)
         self.signals_dir = os.path.join(self.dataset_dir, "signals")
@@ -77,8 +62,8 @@ class ODMRDatasetSynthetic(Dataset):
     def __getitem__(self, idx):
         row = self.metadata.iloc[idx]
         config_id = int(row["experiment_id"])
-        signals = np.load(os.path.join(self.signals_dir, f"config_{config_id:04d}.npy"))  # (5, 400)
-        spectrum = torch.from_numpy(signals).float()  # (5, 400)
+        signals = np.load(os.path.join(self.signals_dir, f"config_{config_id:04d}.npy"))
+        spectrum = torch.from_numpy(signals).float()
         label = torch.tensor([row[self.label_cols[0]], row[self.label_cols[1]], row[self.label_cols[2]]], dtype=torch.float32)
         return spectrum, label
 
@@ -165,17 +150,7 @@ def default_num_mw_configs(synthetic=False, dataset_dir=None):
 
 
 def resolve_mw_indices(synthetic=False, mw_configs=None, dataset_dir=None):
-    """
-    Resolve MW configuration channel indices from CLI/training parameters.
-
-    Args:
-        synthetic: Legacy fallback when dataset_dir is unavailable
-        mw_configs: Explicit list of config indices (default: all configs in dataset)
-        dataset_dir: Path to dataset — used to auto-detect the number of MW channels
-
-    Returns:
-        List of MW config indices
-    """
+    """Resolve MW configuration channel indices from CLI/training parameters."""
     max_configs = detect_num_mw_configs(dataset_dir, synthetic=synthetic)
     if mw_configs is not None:
         indices = list(mw_configs)
@@ -205,15 +180,7 @@ class MWConfigSubset(Dataset):
 
 
 def train_val_test_split(dataset_dir, val_size=0.15, test_size=0.15, random_state=1, synthetic=False, mw_indices=None):
-    """
-    Split the dataset by experiment_ids into train, val, and test sets.
-    
-    Args:
-        dataset_dir: Path to dataset directory
-        val_size: Validation set size (fraction)
-        test_size: Test set size (fraction)
-        random_state: Random seed for reproducibility
-    """
+    """Split the dataset by experiment_ids into train, val, and test sets."""
     metadata = pd.read_csv(os.path.join(dataset_dir, "metadata.csv"))
     config_ids = metadata["experiment_id"].values
 
@@ -227,7 +194,7 @@ def train_val_test_split(dataset_dir, val_size=0.15, test_size=0.15, random_stat
     if synthetic:
         full_dataset = ODMRDatasetSynthetic(dataset_dir)
     else:
-        full_dataset = ODMRDatasetMultiConfig(dataset_dir)
+        full_dataset = ODMRDataset(dataset_dir)
 
     if mw_indices is None:
         mw_indices = resolve_mw_indices(synthetic=synthetic, dataset_dir=dataset_dir)
@@ -250,7 +217,7 @@ def _build_full_dataset(dataset_dir, synthetic=False, mw_indices=None):
     if synthetic:
         full_dataset = ODMRDatasetSynthetic(dataset_dir)
     else:
-        full_dataset = ODMRDatasetMultiConfig(dataset_dir)
+        full_dataset = ODMRDataset(dataset_dir)
     if mw_indices is None:
         mw_indices = resolve_mw_indices(synthetic=synthetic, dataset_dir=dataset_dir)
     max_configs = detect_num_mw_configs(dataset_dir, synthetic=synthetic)
@@ -288,35 +255,8 @@ def _homogeneous_val_per_zone(n_total, n_zones, val_size, val_samples_per_zone):
     return max(1, int(round(val_size * n_total / n_zones)))
 
 
-def stratified_zone_split(
-    dataset_dir,
-    val_size=0.10,
-    test_size=0.10,
-    random_state=1,
-    synthetic=False,
-    mw_indices=None,
-    balanced_val=True,
-    val_samples_per_zone=None,
-    balanced_test=False,
-    test_samples_per_zone=1,
-):
-    """
-    Split the dataset by zone indices into train, val, and test sets.
-
-    Default (~80/10/10): validation with the same target count per zone (where
-    feasible), topped up to ~val_size globally; test ~test_size per zone; rest train.
-
-    Small zones keep fewer val samples; extra val is taken from large zones so
-    the global val fraction reaches ~10%.
-
-    Args:
-        val_size: Target validation fraction (used to auto-set val_samples_per_zone).
-        test_size: Test fraction within each zone (after val is removed).
-        balanced_val: If True, assign the same number of val samples to every zone.
-        val_samples_per_zone: Explicit val count per zone (overrides val_size auto).
-        balanced_test: Legacy mode — fixed test count per zone, then split train/val.
-        test_samples_per_zone: Test samples per zone when balanced_test=True.
-    """
+def stratified_zone_split(dataset_dir=None, synthetic=False, mw_indices=None, val_size=0.10, test_size=0.10, random_state=1, balanced_val=True, val_samples_per_zone=None, balanced_test=False, test_samples_per_zone=1):
+    """Split the dataset by zone indices into train, val, and test sets."""
     full_dataset = _build_full_dataset(dataset_dir, synthetic=synthetic, mw_indices=mw_indices)
 
     zones, _, _ = compute_zones_for_dataset(dataset_dir)
@@ -338,21 +278,34 @@ def stratified_zone_split(
         k = int(test_samples_per_zone)
         if k < 1:
             raise ValueError("test_samples_per_zone must be >= 1")
-        if k >= min_zone_count:
+        if k >= min_zone_count and min_zone_count > 1:
             raise ValueError(
                 f"test_samples_per_zone={k} is too large: the smallest zone has "
                 f"only {min_zone_count} samples (need at least 1 left for train/val)."
             )
-        print(f"Balanced test split: {k} sample(s) per zone x {len(all_zones)} zones "
-              f"= {k * len(all_zones)} test samples (disjoint from train/val)")
+        skipped_test_zones = []
+        print(
+            f"Balanced test split: up to {k} sample(s) per zone x {len(all_zones)} zones "
+            f"(zones with <= {k} sample(s) go entirely to train/val)"
+        )
 
         for zone in all_zones:
             indices = shuffle(zone_indices[zone], random_state=rng)
+            n = len(indices)
+            if n <= k:
+                if n == 1:
+                    train_idx.extend(indices)
+                    skipped_test_zones.append(zone)
+                elif n == 0:
+                    continue
+                else:
+
+                    train_idx.extend(indices)
+                    skipped_test_zones.append(zone)
+                continue
             test_idx.extend(indices[:k])
             remaining = indices[k:]
             n_rem = len(remaining)
-            if n_rem == 0:
-                continue
             if n_rem == 1:
                 train_idx.extend(remaining)
                 continue
@@ -360,6 +313,12 @@ def stratified_zone_split(
             n_val = min(n_val, n_rem - 1)
             val_idx.extend(remaining[:n_val])
             train_idx.extend(remaining[n_val:])
+        if skipped_test_zones:
+            print(
+                f"  Warning: {len(skipped_test_zones)} zone(s) with <= {k} sample(s) "
+                f"have no test sample: {skipped_test_zones}"
+            )
+        print(f"  Test samples: {len(test_idx)} (target was up to {k * len(all_zones)})")
     elif balanced_val:
         n_zones = len(all_zones)
         k_target = _homogeneous_val_per_zone(n_total, n_zones, val_size, val_samples_per_zone)
@@ -368,22 +327,36 @@ def stratified_zone_split(
         else:
             target_val = _val_target_count(n_total, n_zones, val_size, val_samples_per_zone)
         zone_splits = {}
+        skipped_small_zones = []
 
         for zone in all_zones:
             indices = shuffle(zone_indices[zone], random_state=rng)
             n = len(indices)
+            if n == 1:
+                zone_splits[zone] = {"val": [], "test": [], "train": list(indices)}
+                skipped_small_zones.append(zone)
+                continue
+            if n == 2:
+                zone_splits[zone] = {"val": [], "test": [indices[0]], "train": [indices[1]]}
+                continue
+
             n_test = max(1, int(np.round(test_size * n)))
-            n_test = min(n_test, max(1, n - 2))
+            n_test = min(n_test, n - 2)
             k_val = min(k_target, n - n_test - 1)
             if k_val < 1:
-                raise ValueError(
-                    f"Zone {zone} has only {n} samples; cannot allocate test, val, and train."
-                )
+                k_val = 0
+                n_test = min(n_test, n - 1)
             zone_splits[zone] = {
                 "val": list(indices[:k_val]),
                 "test": list(indices[k_val:k_val + n_test]),
                 "train": list(indices[k_val + n_test:]),
             }
+
+        if skipped_small_zones:
+            print(
+                f"  Warning: {len(skipped_small_zones)} zone(s) with 1 sample go entirely to train: "
+                f"{skipped_small_zones}"
+            )
 
         cur_val = sum(len(s["val"]) for s in zone_splits.values())
         if cur_val < target_val:
@@ -428,7 +401,7 @@ def stratified_zone_split(
             val_idx.extend(indices[n_train:n_train + n_val])
             test_idx.extend(indices[n_train + n_val:])
 
-        # Legacy: ensure every split contains at least one sample from every zone
+
         for split_idx in [train_idx, val_idx, test_idx]:
             split_zones = set(zones[split_idx])
             missing_zones = set(all_zones) - split_zones
@@ -464,11 +437,7 @@ def stratified_zone_split(
 
 
 def get_data_loaders(train_set, val_set, test_set, batch_size=32, device="cpu"):
-    """
-    Utility to create DataLoaders from Subsets.
-    Returns:
-        train_loader, val_loader, test_loader
-    """
+    """Create train/val/test DataLoaders from Subsets."""
     pin_memory = True if device == "cuda" else False
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=pin_memory)
     val_loader   = DataLoader(val_set,   batch_size=batch_size, shuffle=False, num_workers=0)
@@ -477,20 +446,14 @@ def get_data_loaders(train_set, val_set, test_set, batch_size=32, device="cpu"):
 
 
 def get_frequency_axis(dataset_dir):
-    """
-    Extract frequency axis from frequencies.npy in the dataset directory.
-    Returns:
-        freq_axis (np.ndarray): Frequency axis in Hz
-    """
+    """Return frequency axis in Hz from frequencies.npy (or a default linspace)."""
     freq_path = os.path.join(dataset_dir, "frequencies.npy")
 
-    # Extract frequency axis (in Hz) from frequencies.npy if it exists, otherwise create it based on known range
     if os.path.exists(freq_path):
         freq_axis = np.load(freq_path)
     else:
         freq_axis = np.linspace(2.7, 3.1, 201)
 
-    # Convert to Hz if in GHz if needed (assuming if max < 1000, it's in GHz)
     if freq_axis.max() < 1000:
         freq_axis_Hz = freq_axis * 1e9
     else:
@@ -500,39 +463,27 @@ def get_frequency_axis(dataset_dir):
 
 
 def print_dataset_statistics(train_set, val_set, test_set, label_names, labels_mean, labels_std):
-    """
-    Print statistics for the dataset: label stats (normalized and denormalized), signal stats, and frequency axis.
-    Args:
-        full_dataset: Dataset object (should support __getitem__ returning (signal, label))
-        label_names: List of label names (e.g., ['Ax', 'Ay', 'Az'])
-        labels_mean: Mean used for normalization
-        labels_std: Std used for normalization
-        train_set, val_set, test_set: Subsets for printing sizes
-    """
+    """Print label and signal statistics for train/val/test splits."""
     print("DATASET STATISTICS")
     print("=" * 60)
     print(f"Dataset name: {train_set.dataset.dataset_dir.split(os.sep)[-1]}")
     print(f"Dataset sizes:  Total: {len(train_set) + len(val_set) + len(test_set)} | Train: {len(train_set)} | Val: {len(val_set)} | Test: {len(test_set)}")
     print()
 
-    # Access the full dataset from the Subset to compute statistics
     full_dataset = train_set.dataset
     all_labels = torch.stack([full_dataset[i][1] for i in range(len(full_dataset))], dim=0)
     all_labels_denorm = all_labels * torch.tensor(labels_std) + torch.tensor(labels_mean)
 
-    # Print normalized label stats
     print("Normalized labels stats:")
     for i, name in enumerate(label_names):
         print(f"  {name}: mean={all_labels[:,i].mean():.3f}, std={all_labels[:,i].std():.3f}, min={all_labels[:,i].min():.3f}, max={all_labels[:,i].max():.3f}")
     print()
 
-    # Print denormalized label stats
     print("Labels phys stats (dataset):")
     for i, name in enumerate(label_names):
         print(f"  {name}: mean={all_labels_denorm[:,i].mean():.3f}, std={all_labels_denorm[:,i].std():.3f}, min={all_labels_denorm[:,i].min():.3f}, max={all_labels_denorm[:,i].max():.3f}")
     print()
 
-    # Print signal stats
     all_signals = torch.cat([full_dataset[i][0] for i in range(len(full_dataset))], dim=0)
     print("Signals stats:")
     print(f"  mean={all_signals.mean():.3f}, std={all_signals.std():.3f}, min={all_signals.min():.3f}, max={all_signals.max():.3f}")

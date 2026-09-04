@@ -174,7 +174,7 @@
       "R\u00b2": -0.004
     }
   },
-  "HybridODMRPredictor": {
+  "AxisSplitRegressor": {
     "Ax": {
       "MAE": 0.006,
       "RMSE": 0.007,

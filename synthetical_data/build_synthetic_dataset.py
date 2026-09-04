@@ -1,27 +1,5 @@
-"""
-Simulate synthetic ODMR spectra from real current labels.
+"""Build synthetic ODMR spectra from real current labels."""
 
-Reads (Ax, Ay, Az) from an existing real dataset, runs the quantum simulator for
-each sample and each MW configuration, and saves the raw (un-normalized) results.
-
-Output structure:
-    <output_dir>/
-    ├── metadata.csv        # experiment_id, Ax, Ay, Az  (raw physical units)
-    ├── frequencies.npy     # (Wnr,) frequency axis in MHz
-    └── signals/
-        ├── config_0000.npy # (n_mw_configs, Wnr) raw spectra
-        ├── config_0001.npy
-        └── ...
-
-Run normalize_synthetic_dataset.py afterwards to apply global normalization and
-produce the final training-ready dataset (identical layout to prepare_pytorch_dataset.py).
-
-Usage:
-    cd synthetical_data
-    python build_synthetic_dataset.py --real_meta_dir ../datasets_pytorch/dataset_multi_mw_2
-    python build_synthetic_dataset.py --real_meta_dir ../datasets_pytorch/dataset_multi_mw_2 \\
-        --output_dir ../datasets_synthetic/synthetic_multi_mw_raw --noise_std 0.005
-"""
 
 import sys
 import argparse
@@ -114,10 +92,8 @@ def build_dataset(
                 spectrum = spectrum + rng.normal(0.0, noise_std, size=spectrum.shape)
             all_signals[idx, mw_idx, :] = spectrum.astype(np.float32)
 
-    # Save frequencies
     np.save(output_dir / "frequencies.npy", freq_list.astype(np.float32))
 
-    # Save raw labels (physical units, not normalized)
     metadata = pd.DataFrame({
         "experiment_id": range(n_samples),
         "Ax": raw_labels["Ax"].values.astype(np.float32),
@@ -126,7 +102,6 @@ def build_dataset(
     })
     metadata.to_csv(output_dir / "metadata.csv", index=False)
 
-    # Save individual signal files
     print("\nSaving signal files …")
     for exp_id in tqdm(range(n_samples)):
         np.save(signals_dir / f"config_{exp_id:04d}.npy", all_signals[exp_id])

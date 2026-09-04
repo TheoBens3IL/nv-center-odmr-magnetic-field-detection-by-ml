@@ -9,8 +9,7 @@ CURRENT_TO_FIELD_MT_PER_A = 0.765
 CURRENT_TO_FIELD_T_PER_A = CURRENT_TO_FIELD_MT_PER_A * 1e-3
 
 
-# Typical ODMR dip HWHM scale (MHz) — used to express frequency errors as dimensionless
-# fractions (~1 = one linewidth), not an arbitrary rescaling from GHz.
+# Typical ODMR dip HWHM (MHz) for dimensionless frequency error.
 ODMR_LINEWIDTH_MHZ = 50.0
 NV_TRANSITIONS_PER_SAMPLE = 8
 

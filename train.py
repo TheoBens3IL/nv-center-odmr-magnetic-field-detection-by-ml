@@ -3,13 +3,14 @@ from torch import nn
 import numpy as np
 import os
 import argparse
+import time
 from dataset import train_val_test_split, print_dataset_statistics, get_data_loaders, get_frequency_axis, resolve_mw_indices, detect_num_mw_configs, detect_n_freq
-from utils import EarlyStopping, load_normalization_stats, denormalize_labels, plot_training_history, get_model_output_dir, save_cnn_training_run_if_improved
+from utils import EarlyStopping, load_normalization_stats, denormalize_labels, plot_training_history, get_model_output_dir, save_cnn_training_run_if_improved, try_save_best_checkpoint, print_training_timing, format_duration
 from physics_informed import extract_measured_peaks_batch, physics_loss_from_current, CURRENT_TO_FIELD_MT_PER_A
 import models
 
 
-# WeightedMSELoss for HybridODMRPredictor
+# WeightedMSELoss for AxisSplitRegressor
 class WeightedMSELoss(nn.Module):
     def __init__(self, weights):
         super().__init__()
@@ -27,7 +28,6 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
     DATASET_DIR = os.path.join("datasets_pytorch", dataset_dir)
     mw_indices = resolve_mw_indices(synthetic=synthetic, mw_configs=mw_configs, dataset_dir=DATASET_DIR)
 
-
     # Check if model is available
     if model_name not in models.available_models():
         raise ValueError(f"Unknown model: {model_name}. Available models: {list(models.available_models().keys())}")
@@ -36,7 +36,7 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
     n_channels = len(mw_indices)
 
     model_class = models.available_models()[model_name]
-    if model_name == 'HybridODMRPredictor':
+    if model_name == 'AxisSplitRegressor':
         model = model_class(n_channels=n_channels, n_freq=n_freq, use_attention=use_attention).to(DEVICE)
     else:
         model = model_class(n_channels=n_channels, n_freq=n_freq).to(DEVICE)
@@ -50,14 +50,12 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
     labels_mean = norm_stats['labels_mean']
     labels_std = norm_stats['labels_std']
     label_names = ['Ax', 'Ay', 'Az']
-    
+
     if show_dataset_stats:
         print_dataset_statistics(train_set, val_set, test_set, label_names, labels_mean, labels_std)
 
-    # Model is already instantiated above with correct n_channels and n_freq
-
     # Loss function
-    if model_name == 'HybridODMRPredictor' and loss_weights is not None:
+    if model_name == 'AxisSplitRegressor' and loss_weights is not None:
         criterion = WeightedMSELoss(loss_weights)
     else:
         criterion = nn.MSELoss()
@@ -68,15 +66,6 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
     if use_physics_loss:
         print(f"Physics-informed loss enabled (weight={physics_loss_weight}, 1 A -> {CURRENT_TO_FIELD_MT_PER_A} mT)")
 
-    # Cosine annealing with warm restarts - good for larger datasets
-    # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    #     optimizer,
-    #     T_0=30,        # Initial restart period (longer for more data)
-    #     T_mult=2,      # Period multiplier
-    #     eta_min=1e-6   # Minimum LR
-    # )
-
-    # ReduceLROnPlateau scheduler - reduces LR when a metric has stopped improving
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode='min',
@@ -98,6 +87,8 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
     }
 
     # ========== TRAINING LOOP ========== #
+    t_train_start = time.perf_counter()
+    epochs_completed = 0
     for epoch in range(epochs):
         # ===== Training Phase ===== #
         model.train()
@@ -140,8 +131,8 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
                 x = x.to(DEVICE)
                 y = y.to(DEVICE)
                 pred = model(x)
-                
-                # Loss on normalized labels (for training)
+
+
                 val_loss += criterion(pred, y).item()
                 
                 # Denormalize for evaluation metrics in original scale
@@ -158,13 +149,9 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
             history[k].append(mae_denorm[i].item())
         history['physics_loss'].append(physics_loss_val)
 
-        # Scheduler step (Cosine annealing updates every epoch)
-        # scheduler.step()
-
         # Scheduler step (ReduceLROnPlateau updates on validation loss)
         scheduler.step(val_loss)
 
-        # Format units for display
         units = ['A', 'A', 'A']
 
         if epoch == 0 or (epoch + 1) % 5 == 0 or (epoch + 1) == epochs:
@@ -178,9 +165,12 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
             )
 
         # Early stopping check
+        epochs_completed = epoch + 1
         if early_stopping.step(val_loss, model):
             print("Early stopping triggered")
             break
+
+    print_training_timing(model_name, t_train_start, epochs_completed, epochs)
 
     # Restore best model (whether early stopping was triggered or not)
     model.load_state_dict(early_stopping.best_state)
@@ -210,8 +200,9 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
     print(f"  MAE  Ax/Ay/Az: {mae[0]:.4f} / {mae[1]:.4f} / {mae[2]:.4f} A")
     print(f"  RMSE Ax/Ay/Az: {rmse[0]:.4f} / {rmse[1]:.4f} / {rmse[2]:.4f} A")
 
-    # === Smart saving system (global + per MW-count directories) ===
     current_mae_mean = sum(float(history[mae_keys[i]][-1]) for i in range(3)) / 3
+    test_mae_mean = float(np.mean(mae))
+    print(f"\nTest MAE (mean over Ax/Ay/Az): {test_mae_mean:.4f} A")
     train_config = {
         'batch_size': batch_size,
         'epochs': epochs,
@@ -240,17 +231,27 @@ def train(batch_size=32, epochs=200, lr=2e-4, weight_decay=5e-4, dataset_dir="da
         use_physics_loss=use_physics_loss,
         physics_loss_weight=physics_loss_weight,
         plot_training_history_fn=plot_training_history,
+        test_mae_mean=test_mae_mean,
     )
+    checkpoint_name = f"{model_name.lower()}_best_model.pth"
     for per_mw_count in (False, True):
         output_dir = get_model_output_dir(dataset_dir, model_name, mw_indices, per_mw_count=per_mw_count)
         save_cnn_training_run_if_improved(model_dir=output_dir, **save_kwargs)
+        try_save_best_checkpoint(
+            model,
+            output_dir,
+            checkpoint_name,
+            "best_test_mae.txt",
+            test_mae_mean,
+            higher_is_better=False,
+        )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train ODMR CNN model for magnetic field detection')
 
     # Model selection
-    parser.add_argument('--model', type=str, default='ODMR_CNN', choices=['ODMR_CNN', 'ODMR_CNN_Compact', 'ODMR_CNN_Deep', 'FrequencyAttention', 'MWConfig_CNN', 'HybridODMRPredictor'], help='Model architecture to use (default: FrequencyAttention)')
+    parser.add_argument('--model', type=str, default='ODMR_CNN', choices=['ODMR_CNN', 'ODMR_CNN_Compact', 'ODMR_CNN_Deep', 'FrequencyAttention', 'MWConfig_CNN', 'AxisSplitRegressor'], help='Model architecture to use (default: FrequencyAttention)')
 
     # Training hyperparameters
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training (default: 32)')
@@ -267,9 +268,9 @@ if __name__ == "__main__":
     parser.add_argument('--synthetic', action='store_true', help='Use synthetic dataset (5 MW configs, 400 freq)')
     parser.add_argument('--mw_configs', type=int, nargs='+', default=None, help='Specific MW config indices to use (e.g. 1 3 4 6).')
 
-    # Hybrid-specific arguments
-    parser.add_argument('--loss_weights', type=float, nargs=3, default=None, help='Loss weights for [Ax, Ay, Az] (only for HybridODMRPredictor)')
-    parser.add_argument('--use_attention', action='store_true', help='Use attention branch in HybridODMRPredictor (default: CNN)')
+    # AxisSplitRegressor-specific arguments
+    parser.add_argument('--loss_weights', type=float, nargs=3, default=None, help='Loss weights for [Ax, Ay, Az] (only for AxisSplitRegressor)')
+    parser.add_argument('--use_attention', action='store_true', help='Use attention branch in AxisSplitRegressor (default: CNN)')
     
     # Physics-informed loss parameters
     parser.add_argument('--physic_informed', action='store_true', help='Enable physics-guided loss (PINN)')
@@ -288,7 +289,7 @@ if __name__ == "__main__":
     n_freq = detect_n_freq(dataset_dir_arg, synthetic=args.synthetic)
     n_channels = len(mw_indices)
 
-    if args.model == 'HybridODMRPredictor':
+    if args.model == 'AxisSplitRegressor':
         nb_param = sum(p.numel() for p in models.available_models()[args.model](n_channels=n_channels, n_freq=n_freq, use_attention=args.use_attention).parameters())
     else:
         nb_param = sum(p.numel() for p in models.available_models()[args.model](n_channels=n_channels, n_freq=n_freq).parameters())
@@ -309,14 +310,17 @@ if __name__ == "__main__":
     print(f"Dataset dir:    {args.dataset_dir}")
     print(f"Synthetic:      {args.synthetic}")
     print(f"MW configs:     {mw_indices} ({len(mw_indices)}/{detect_num_mw_configs(dataset_dir_arg, args.synthetic)} channels)")
-    if args.model == 'HybridODMRPredictor':
+    if args.model == 'AxisSplitRegressor':
         print(f"Loss weights:   {args.loss_weights}")
         print(f"Use attention:  {args.use_attention}")
     if args.physic_informed:
         print(f"Physics-informed: 1 A -> {CURRENT_TO_FIELD_MT_PER_A} mT (weight={args.physics_loss_weight})")
     print("=" * 60)
 
+    t_run_start = time.perf_counter()
     try:
         train(batch_size=args.batch_size, epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay, dataset_dir=args.dataset_dir, patience=args.patience, min_delta=args.min_delta, model_name=args.model, loss_weights=args.loss_weights, use_attention=args.use_attention, physics_loss_weight=args.physics_loss_weight, use_physics_loss=args.physic_informed, show_dataset_stats=args.show_dataset_stats, synthetic=args.synthetic, mw_configs=args.mw_configs)
     except Exception as e:
         print(f"Error: {e}")
+    else:
+        print(f"\nTotal runtime (train + eval + save): {format_duration(time.perf_counter() - t_run_start)}")

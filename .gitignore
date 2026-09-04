@@ -1,12 +1,20 @@
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# IDE
 .vscode/
+
+# Raw / generated data
 datasets_raw/
-
-NV_ordeing_by_projection_10.csv
-ESRpeakOrderPlotterv2.py
-
 datasets_synthetic/
+datasets_pytorch/
 datasets_pytorch/synthetic*
+
+# Synthetic-data exploration outputs
 synthetical_data/fluorescence_over_phase/
 synthetical_data/tilt_scan_heatmap/
